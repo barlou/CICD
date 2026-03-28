@@ -1,0 +1,513 @@
+name: Security scan
+
+on:
+  push:
+    branches:
+      - release
+  workflow_call:
+    inputs:
+      gitleaks_allow_failure:
+        required: false
+        type: boolean
+        default: false
+      semgrep_allow_failure:
+        required: false
+        type: boolean
+        default: false
+      pip_audit_allow_failure:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      GH_TOKEN: 
+        required: true
+    outputs: 
+      security_status:
+        description: "overall: success or failure"
+        value: ${{ jobs.report.outputs.security_status }}
+  workflow_dispatch:
+    inputs:
+      gitleaks_allow_failure:
+        required: false
+        type: boolean
+        default: false
+      semgrep_allow_failure:
+        required: false
+        type: boolean
+        default: false
+      pip_audit_allow_failure:
+        required: false
+        type: boolean
+        default: false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jobs run in parallel — report job collects all results and decides
+# whether to block or continue based on allow_failure flags
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs: 
+  # 1. Gitleaks - secret detection on delta commits only 
+  gitleaks:
+    name: Gitleaks - secret detection
+    runs-on: ubuntu-24.04
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+    
+    steps:  
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+      
+      - name: Resolve scan range
+        id: range
+        run: | 
+          set -euo pipefail
+
+          # Commits on release not yet on main - the delta only 
+          git fetch origin main --depth=50
+
+          BASE=$(git merge-base HEAD origin/main)
+          echo "Scan base commit: $BASE"
+          echo "Scan head commit: ${{ github.sha }}"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+      
+      - name: Run gitleaks on delta 
+        id: scan 
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          # Install gitleaks
+          GITLEAKS_VERSION="8.12.2"
+          curl -sSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          chmod +x gitleaks 
+
+          echo "Scanning commits from ${{ steps.range.outputs.base }} to HEAD"
+
+          # --log-opts restricts scan to delta commits only
+          ./gitleaks detect \
+            --source . \
+            --log-opts "${{ steps.range.outputs.base }}..HEAD" \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --exit-code 1 \
+            --no-banner \
+            --verbose \
+            && SCAN_STATUS="success" \
+            || SCAN_STATUS="failure"
+
+          echo "status=$SCAN_STATUS" >> "$GITHUB_OUTPUT"
+
+          if [[ "$SCAN_STATUS" == "failure" ]]; then 
+            echo "::error::Gitleaks detected secrets in the delta commits"
+            echo "Findings:"
+            cat gitleaks-report.json | python3 -c "
+          import json, sys
+          findings = json.load(sys.stdin)
+          if not findings:
+            print('No finding')
+          else:
+            for f in findings:
+              print(f\" [{f.get('RuleID', '?')}] {f.get('File', '?')}:{f.get('StartLine', '?')} - {f.get('Description', '?')}\") 
+            "
+          else
+            echo "No secrets detected"
+          fi
+
+      - name: Upload gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: 
+          name: gitleaks-report
+          path: gitleaks-report.json
+          retention-days: 7
+          if-no-files-found: ignore
+  # 2. Semgrep - SAST on changed files only
+  semgrep:
+    name: Semgrep - static analysis
+    runs-on: ubuntu-24.04
+    outputs:
+      status: ${{ steps.scan.outputs.status }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+      
+      - name: Resolved change files in delta
+        id: changed 
+        run: |
+          set -euo pipefail
+
+          git fetch origin main --depth=50
+          BASE=$(git merge-base HEAD origin/main)
+
+          # Get list of changed files in the delta - Python and relevant files only 
+          CHANGED=$(git diff --name-only "$BASE..HEAD" \
+            | grep -E '\.(py|scala|java|yaml|yml|json|sh|txt|md|toml)$' \
+            | tr '\n' ' ' || true)
+          
+          echo "Changed files: $CHANGED"
+
+          if [[ -z "$CHANGED" ]]; then 
+            echo "No relevant files changed in delta - skipping Semgrep"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "files=$CHANGED" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python for Semgrep
+        if: steps.changed.outputs.skip == "false"
+        uses: actions/setup-python@v5
+        with: 
+          python-version: "3.11"
+      
+      - name: Install Semgrep
+        if: steps.changed.outputs.skip == 'false'
+        run: pip install semgrep --quiet
+
+      - name: Run Semgrep on changed files
+        id: scan
+        if: steps.changed.outputs.skip == "false"
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          # OSS mode - no token needed
+          # Rules: python, owasp-top-ten, secrets, best practice
+          semgrep scan \
+            --config "p/python" \
+            --config "p/owasp-top-ten" \
+            --config "p/secrets" \
+            --config "p/ci" \
+            --json \
+            --output semgrep-report.json \
+            ${{ steps.changed.outputs.files }} \
+            && SCAN_STATUS="success" \
+            || SCAN_STATUS="failure"
+          
+          echo "status=$SCAN_STATUS" >> "$GITHUB_OUTPUT"
+
+          if [[ "$SCAN_STATUS" == "failure" ]]; then 
+            echo "::error::Semgrep found issues in changed files"
+            python3 - <<'PYEOF'
+          import json, sys
+
+          with open("semgrep-report.json") as fh:
+            report = json.load(fh)
+
+          results = report.get("results", [])
+          errors = report.get("errors", [])
+
+          if not results and not errors:
+            print("No findings.")
+            sys.exit(0)
+          
+          # Group by severity 
+          by_severity = {}
+          for r in results:
+            sev   = r.get("extra", {}).get("severity", "UNKNOWN")
+            path  = r.get("path", "?")
+            line  = r.get("start", {}).get("line", "?")
+            msg   = r.get("extra", {}).get("message", "?").strip().splitlines()[0]
+            check = r.get("check_id", "?")
+            by_severity.setdefault(sev, []).append(
+              f"  [{check}] {path}:{line} - {msg}"
+            )
+          for sev in ["ERROR", "WARNING", "INFO"]:
+            if sev in by_severity:
+              print(f"\n{sev}:")
+              for entry in by_severity[sev]:
+                print(entry)
+            PYEOF
+          else
+            echo "Semgrep scan passed - no issue found"
+          fi
+
+      - name: Mark success if skipped
+        id: skip_status
+        if: steps.changed.outputs.skip == 'true'
+        run: echo "status=success" >> "$GITHUB_OUTPUT"
+      
+      - name: Upload Semgrep report 
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # 3. pip-audit - dependency vulnerability scan 
+  pip-audit:
+    name: pip-audit - dependency vulnerabilities 
+    runs-on: ubuntu-24.04
+    outputs: 
+      status: ${{ steps.scan.outputs.status }}
+    
+    steps:
+      - name: Checkout repository 
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      - name: Check requirements.txt exists
+        id: check_req
+        run: |
+          if [ ! -f "requirements.txt" ]; then
+            echo "::error::requirements.txt not found at repo root"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate all have version constraints
+        id: validate_pins
+        if: steps.check_req.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYEOF'
+          import re, sys
+          
+          unpinned= []
+
+          with open('requirements.txt') as f:
+            for raw_line in f:
+              line=raw_line.strip()
+              
+              # Skip blanks, comments, options, (-r, --index-url etc)
+              if not line or line.startswith("#") or line.startswith("-"):
+                continue 
+              
+              # Strip inline comments 
+              line = line.split("#")[0].strip()
+
+              # A valid constrained line contains ==, >=, <=, ~=, !=, >X, <X
+              # e.g, pandas==2.0.0 / pandas>=2.0.0,<3.0.0 / pandas~=2.0.0
+              if not re.search(r'(==|>=|<=|~=|!=|<|>)', line):
+                unpinned.append(line)
+              
+            if unpinned:
+              print("::error::The following packages in requirements.txt have no version constraints:")
+              for pkg in unpinned:
+                print(f"  -{pkg}")
+              print("Every package must declare a version constraints, e.g.:")
+              print("  pandas==2.0.0")
+              print("  pandas>=2.0.0,<3.0.0")
+              sys.exit(1)
+            else:
+              print(f"All {sum(1 for l in open('requirements.txt') if l.strip() and not l.startswith('#'))} packages have versions constraints")
+          PYEOF
+      
+      - name: Set up python
+        if: steps.check_req.outputs.exists == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install pip-audit 
+        if: steps.check_req.outputs.exists == 'true'
+        run: pip install pip-audit --quiet
+
+      - name: Run pip-audit
+        id: scan
+        if: steps.check_req.outputs.exists == 'true'
+        continue-on-error: true
+        run: | 
+          set -euo pipefail
+
+          pip-audit \
+            --requirements requirements.txt \
+            --format json \
+            --output pip-audit-report.json \
+            --desc \
+            && SCAN_STATUS="success" \
+            || SCAN_STATUS="failure"
+
+          echo "status=$SCAN_STATUS" >> "$GITHUB_OUTPUT"
+
+          if [[ "$SCAN_STATUS" == "failure" ]]; then
+            echo "::error::pip-audit found vulnerable dependencies"
+            python3 - <<'PYEOF'
+          import json
+
+          with open("pip-audit-report.json") as fh:
+            report = json.load(fh)
+          
+          vulns = report.get("dependencies", [])
+          found = [d for d in vulns if d.get("vulns")]
+
+          if not found:
+            print("No vulnerabilities found in report")
+          else:
+            for dep in found: 
+              name = dep.get("name", "?")
+              version = dep.get("version", "?")
+              for v in dep.get("vulns", []):
+                vid = v.get("id", "?")
+                desc = v.get("description", "?").splitlines()[0]
+                fix = v.get("fix_versions", [])
+                fix_str = ", ".join(fix) if fix else "no fix available"
+                print(f"  [{vid}] {name}=={version} - {desc}")
+                print(f"       Fix: {fix_str}")
+          PYEOF
+          else
+            echo "No vulnerable dependencies found"
+          fi 
+      
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: 
+          name: pip-audit-report
+          path: pip-audit-report.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # 4. Report - collect result, apply allow_failure, merge to main
+  report: 
+    name: Security report and gate 
+    runs-on: ubuntu-24.04
+    needs: [gitleaks, semgrep, pip-audit]
+    if: always()
+    outputs:
+      security_status: ${{ steps.gate.outputs.security_status }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+      
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with: 
+          path: security-report
+          merge-multiple: true 
+      
+      - name: Evaluate results and apply gate
+        id: gate 
+        env:
+          GITLEAKS_STATUS:         ${{ needs.gitleaks.outputs.status }}
+          SEMGREP_STATUS:          ${{ needs.semgrep.outputs.status }}
+          PIP_AUDIT_STATUS:        ${{ needs.pip-audit.outputs.status }}
+          GITLEAKS_ALLOW_FAILURE:  ${{ inputs.gitleaks_allow_failure || false }}
+          SEMGREP_ALLOW_FAILURE:   ${{ inputs.semgrep_allow_failure || false }}
+          PIP_AUDIT_ALLOW_FAILURE: ${{ inputs.pip_audit_allow_failure || false }}          
+        run: | 
+          set -euo pipefail
+
+          python3 - <<'PYEOF'
+          import os, sys
+
+          tools = [
+            {
+              "name": "Gitleaks",
+              "status": os.environ.get("GITLEAKS_STATUS", "failure"),
+              "allow_failure": os.environ.get("GITLEAKS_ALLOW_FAILURE", "false").lower() == "true"
+            }, 
+            {
+              "name": "Semgrep",
+              "status": os.environ.get("SEMGREP_STATUS", "failure"),
+              "allow_failure": os.environ.get("SEMGREP_ALLOW_FAILURE", "false")
+            },
+            {
+              "name": "pip-audit",
+              "status": os.environ.get("PIP_AUDIT_STATUS", "failure"),
+              "allow_failure": os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false")
+            },
+          ]
+
+          print("=== Security gate results ===")
+          print(f"{'Tool':<12} {'Status':<10} {'Allow failure':<15} {'Blocking'}")
+          print("-" * 55)
+
+          blocking_failure = False
+
+          for t in tools:
+            failed = t["status"] != "success"
+            blocking = failed and not t["allow_failure"]
+            marker = "BLOCK" if blocking else ("WARN" if failed else "OK")
+
+            print(f"  {t['name']:<10} {t['status']:<10} {str(t['allow_failure']):<15} {marker}")
+
+            if blocking:
+              blocking_failure = True
+
+          print("")
+
+          if blocking_failure:
+            print("::error::Security gate FAILED - one or more blocking scans found issues")
+            with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("security_status=failure\n")
+            sys.exit(1)
+          else:
+            print("Security gate PASSED")
+            with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("security_status=success\n")
+          PYEOF
+      
+      - name: Write job summary 
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import os 
+          
+          tools = [
+            ("Gitleaks", os.environ.get("GITLEAKS_STATUS", "unknown"), os.environ.get("GITLEAKS_ALLOW_FAILURE", "false")),
+            ("Semgrep", os.environ.get("SEMGREP_STATUS", "unknown"), os.environ.get("SEMGREP_ALLOW_FAILURE", "false")),
+            ("pip-audit", os.environ.get("PIP_AUDIT_STATUS", "unknown"), os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false")),
+          ]
+
+          icons = {"success": "✅", "failure": "❌", "unknown": "❓"}
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh: 
+            fh.write("### Security scan results\n\n")
+            fh.write("| Tool | Status | Allow failure |\n")
+            fh.write("|---|---|---|\n")
+            for name, status, allow in tools:
+              icon = icons.get(status, "?")
+              fh.write(f"| {name} | {icon} {status} | {allow} |\n")
+            fh.write("\n")
+          PYEOF
+        env:
+          GITLEAKS_STATUS: ${{ needs.gitleaks.outputs.status }}
+          SEMGREP_STATUS: ${{ needs.semgrep.outputs.status }}
+          PIP_AUDIT_STATUS: ${{ needs.pip-audit.outputs.status }}
+          GITLEAKS_ALLOW_FAILURE: ${{ inputs.gitleaks_allow_failure || false }}
+          SEMGREP_ALLOW_FAILURE: ${{ inputs.semgrep_allow_failure || false }}
+          PIP_AUDIT_ALLOW_FAILURE: ${{ inputs.pip_audit_allow_failure || false }}
+      
+      # Auto-merge release -> main if gate passed 
+      - name: Merge release into main
+        if: steps.gate.outputs.security_status == 'success'
+        env: 
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: | 
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main release
+
+          git checkout main 
+          git pull origin main 
+
+          git merge origin/release --no-ff \
+            -m "chore(release): merge release -> main after security gate [skip ci]"
+          
+          git push origin main 
+          echo "Merges release -> main - production deploy and release tag will now be trigger"

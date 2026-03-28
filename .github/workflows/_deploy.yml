@@ -1,0 +1,265 @@
+name: Deploy to server
+
+on:
+  workflow_call:
+    inputs:
+      module:
+        required: false
+        type: string
+        default: ""
+      environment:
+        required: true
+        type: string
+      archive_name:
+        required: true
+        type: string
+      skip_jars:
+        required: false
+        type: boolean
+        default: false
+      skip_tools:
+        required: false
+        type: boolean
+        default: false
+      skip_airflow:
+        required: false
+        type: boolean
+        default: false
+      need_jars:
+        required: false 
+        type: boolean
+        default: true 
+      need_tools:
+        required: false 
+        type: boolean
+        default: true
+      need_airflow:
+        required: false
+        type: boolean
+        default: true 
+      need_method:
+        required: false
+        type: boolean
+        default: true
+      jars_version: 
+        required: false
+        type: string
+        default: ""
+      tools_version:
+        required: false
+        type: string
+        default: ""
+      airflow_version: 
+        required: false 
+        type: string
+        default: ""
+      airflow_id:
+        required: false
+        type: string
+        default: ""
+      ssm_prefix:
+        required: false
+        type: string
+        default: ""
+      secrets_map:
+        required: false
+        type: string
+        default: "{}"
+    secrets:
+      SERVER_USERNAME:
+        required: true
+      SERVER_HOST: 
+        required: true
+      SERVER_SSH_KEY:
+        required: true
+    outputs:
+      deployment_id:
+        description: "Unique deployment identifier"
+        value: ${{ jobs.deploy.outputs.deployment_id }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    outputs:
+      deployment_id: ${{ steps.prepare.outputs.deployment_id }}
+
+    steps:
+      # 1. Checkout - needed for deploy.sh
+      - name: Checkout repository 
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 1
+      
+      # 2. Resolve module name - same logic as _build.yml
+      - name: Resolve module name 
+        id: resolve
+        run: | 
+          set -euo pipefail
+
+          MODULE="${{ inputs.module }}"
+          if [[ -z "$MODULE" ]]; then
+            REPO="${{ github.repository }}"
+            MODULE="${REPO##*/}"
+            echo "Derived from repo name: $MODULE"
+          fi
+
+          MODULE=$(echo "$MODULE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          echo "Resolved module: $MODULE"
+          echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+      
+      # 3. Download archive produced by _build.yml
+      - name: Download deployment archive
+        uses: actions/download-artifact@v4
+        with: 
+          name: deployment-archive
+          path: .
+      
+      # 4. Verify archive is present and matches expected name 
+      - name: Verify archive 
+        run: | 
+          set -euo pipefail
+
+          EXPECTED="${{ inputs.archive_name }}"
+          echo "Expected name: $EXPECTED"
+
+          if [ ! -f "$EXPECTED" ]; then
+            # found whatever tar.gz landed and report clearly 
+            FOUND=$(find . -maxdepth 1 -name '*_deployment.tar.gz' | head -n 1)
+            if [[ -z "$FOUND" ]]; then 
+              echo "::error::No deployment archive found. Build may have failed."
+              exit 1
+            fi 
+            echo "::warning::Expected $EXPECTED but found $FOUND - renaming"
+            mv "$FOUND" "$EXPECTED"
+          fi 
+
+          echo "Archive verified: $EXPECTED"
+          echo "Size: $(du -sh "$EXPECTED" | cut -f1)"
+          echo "Contents:"
+          tar -tzf "$EXPECTED"
+        
+      # 5. Prepare deployment ID and env file
+      - name: Prepare deployment context
+        id: prepare
+        run: | 
+          set -euo pipefail
+
+          DEPLOYMENT_ID="deploy_${{ github.run_id }}_$(date +%Y%m%d_%H%M%S)"
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "Deployment ID: $DEPLOYMENT_ID"
+
+          # Build the env file transferred to the server
+          # Contains no secret values - only runtime context
+          cat > deploy_env.sh <<EOF
+          export MODULE_NAME="${{ steps.resolve.outputs.module }}"
+          export ENVIRONMENT="${{ inputs.environment }}"
+          export DEPLOYMENT_ID="$DEPLOYMENT_ID"
+          export SSM_PREFIX="${{ inputs.ssm_prefix }}"
+          export NEED_JARS="${{ inputs.need_jars }}"
+          export NEED_TOOLS="${{ inputs.need_tools }}"
+          export NEED_AIRFLOW="${{ inputs.need_airflow }}"
+          export NEED_METHOD="${{ inputs.need_method }}"
+          export SKIP_JARS="${{ inputs.skip_jars }}"
+          export SKIP_TOOLS="${{ inputs.skip_tools }}"
+          export SKIP_AIRFLOW="${{ inputs.skip_airflow }}"
+          export JARS_VERSIONS="${{ inputs.jars_version }}"
+          export TOOLS_VERSIONS="${{ inputs.tools_version }}"
+          export AIRFLOW_VERSION="${{ inputs.airflow_version }}"
+          export AIRFLOW_ID="${{ inputs.airflow_id }}"
+          export SECRET_MAP_JSON="${{ inputs.secret_map }}"
+          EOF
+
+          echo "deploy_env.sh written"
+          cat deploy_env.sh
+      
+      # 6. Setup SSH
+      - name: Setup SSH
+        run: | 
+          mkdir -p ~/.ssh
+          install -m 600 /dev/stdin ~/.ssh/id_rsa <<< "${{ secrets.SERVER_SSH_KEY }}"
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+      
+      # 7. Transfer files to server
+      - name: Transfer archive and scripts
+        env:
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          ARCHIVE:     ${{ inputs.archive_name }}
+        run: | 
+          set -euo pipefail
+
+          echo "Transferring to $SERVER_USER@$SERVER_HOST"
+
+          scp \
+            "$ARCHIVE" \
+            deploy_env.sh \
+            tools/deploy.sh \
+            "$SERVER_USER@$SERVER_HOST":~/
+          
+          echo "Transfer complete"
+
+      # 8. Execute deployment on server 
+      - name: Deploy on server
+        id: deploy_step
+        env:
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          MODULE: ${{ steps.resolve.outputs.module }}
+          DEPLOYMENT_ID: ${{ steps.prepare.outputs.deployment_id }}
+        run: | 
+          set -euo pipefail
+
+          ssh "$SERVER_USER@$SERVER_HOST" bash <<'REMOTE'
+            set -euo pipefail
+
+            source ~/deploy_env.sh
+
+            echo "=== Remote deployment starting ==="
+            echo "  Module:      $MODULE_NAME"
+            echo "  Environment: $ENVIRONMENT"
+            echo "  Deployment:  $DEPLOYMENT_ID"
+            echo "  SSM Prefix:  $SSM_PREFIX"
+            echo ""
+            echo "  need jars:    $NEED_JARS,    skip jars:    $SKIP_JARS"
+            echo "  need tools:   $NEED_TOOLS,   skip tools:   $SKIP_TOOLS"
+            echo "  need airflow: $NEED_AIRFLOW, skip airflow: $SKIP_AIRFLOW "
+            echo "  need method:  $NEED_METHOD"
+
+            chmod +x ~/deploy.sh 
+            bash ~/deploy.sh
+
+            echo "=== Remote deployment complete ==="
+          REMOTE
+      
+      # 9. Server cleanup - remove temp files transferred to home
+      - name: Server cleanup
+        if: always()
+        env: 
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          MODULE:      ${{ steps.resolve.outputs.module }}
+          ARCHIVE:     ${{ inputs.archive_name }}
+        run: |
+          ssh "$SERVER_USER@$SERVER_HOST" bash <<REMOTE
+            set -euo pipefail
+            echo "Cleaning up home dir.."
+            rm -f ~/deploy_env.sh ~/deploy.sh ~/"$ARCHIVE"
+            echo "Home after cleanup:"
+            ls -lh ~/
+          REMOTE
+
+      # 10. Deployment summary 
+      - name: Deployment summary 
+        if: always()
+        run: |
+          echo "### Deployment summary " >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Module | ${{ steps.resolve.outputs.module }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | ${{ inputs.environment }} |" >> "$GITHUB_STEP_SUMMARY" 
+          echo "| Deployment ID | ${{ steps.prepare.outputs.deployment_id }} |" >> "$GITHUB_STEP_SUMMARY" 
+          echo "| Jars | ${{ inputs.skip_jars == 'true' && 'skipped (up to date)' || inputs.need_jars == 'true' && 'deployed' || 'not requred' }} |" >> "$GITHUB_STEP_SUMMARY" 
+          echo "| Tools/utils | ${{ inputs.skip_tools == 'true' && 'skipped (up to date)' || inputs.need_tools == 'true' && 'deployed' || 'not required' }} |" >> "$GITHUB_STEP_SUMMARY" 
+          echo "| Airflow | ${{ inputs.skip_airflow == 'true' && 'skipped (up to date)' || inputs.need_airflow == 'true' && 'deployed' || 'not required' }} |" >> "$GITHUB_STEP_SUMMARY" 
+          echo "| method/business | ${{ inputs.need_method == 'true' && 'deployed (always refresh)' || 'not required' }} |" >> "$GITHUB_STEP_SUMMARY" 
+      

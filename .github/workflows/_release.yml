@@ -1,0 +1,324 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_call:
+    inputs:
+      module: 
+        required: false
+        type: string
+        default: ""
+    secrets:
+      GH_TOKEN:
+        required: true 
+    outputs:
+      tag_name:
+        value: ${{ jobs.release.outputs.tag_name }}
+      new_version:
+        value: ${{ jobs.release.outputs.new_version }}
+  workflow_dispatch:
+    inputs:
+      module:
+        required: false
+        type: string 
+        default: ""
+
+jobs: 
+  release:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag_name:    ${{ steps.compute.outputs.tag_name }}
+      new_version: ${{ steps.compute.outputs.new_version }}
+    
+    steps:
+      # 1. Checkout - full history needed for tag + commit scraping
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+      
+      # 2. Resolve module name - same logic across all workflows
+      - name: Resolve name 
+        id: resolve
+        run: | 
+          set -euo pipefail
+
+          MODULE="${{ inputs.module }}"
+          if [[ -z "$MODULE" ]]; then
+            REPO="${{ github.repository }}"
+            MODULE="${REPO##*/}"
+            echo "Derived from repo name: $MODULE"
+          fi
+
+          MODULE=$(echo "$MODULE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          echo "Resolved module: $MODULE"
+          echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+      
+      # 3. Compute next version 
+      - name: Compute next version 
+        id: compute
+        env:
+          MODULE: ${{ steps.resolve.outputs.module }}
+        run: |
+          set -euo pipefail 
+
+          # Find lastest tag machine {module}-vX.Y.Z on main only
+          LATEST_TAG=$(git tag --sort=-v:refname \
+            | grep -E "^${MODULE}-v[0-9]+\.[0-9]+\.[0-9]+$" \
+            | head -n 1 || true)
+          
+          if [[ -z "$LATEST_TAG" ]]; then 
+            echo "No existing tag found - starting at ${MODULE}-v1.0.0"
+            NEW_TAG="${MODULE}-v1.0.0"
+            NEW_VERSION="1.0.0"
+
+            echo "tag_name=$NEW_TAG"        >> "$GITHUB_OUTPUT"
+            echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+            echo "latest_tag="              >> "$GITHUB_OUTPUT"
+            echo "bump=init"                >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Latest tag: $LATEST_TAG"
+
+          # Parse current version 
+          VERSION="${LATEST_TAG#${MODULE}-v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          echo "Current version: $MAJOR.$MINOR.$PATCH"
+
+          # Collect commits on main since last tag 
+          COMMITS=$(git log "${LATEST_TAG}..HEAD" \
+            --first-parent \
+            --pretty=format:"%s" \
+            --no-merges 2>/dev/null || true)
+          
+          if [[ -z "$COMMITS" ]]; then
+            echo "::error::No commits found since $LATEST_TAG - nothing to release"
+            exit 1
+          fi
+
+          echo "Commits since $LATEST_TAG:"
+          echo "$COMMITS"
+          echo ""
+
+          # Determine bump - highest priority wins
+          # Priority: breaking > feat > fix
+          BUMP="none"
+
+          while IFS= read -r commit; do
+            # Extract everything before the first ':'
+            PREFIX=$(echo "$commit" | cut -d':' -f1 | tr '[:upper:]' '[:lower:]' | xargs)
+
+            case "$PREFIX" in 
+              breaking)
+                BUMP="breaking"
+                break
+                ;;
+              feat)
+                [[ "$BUMP" != "breaking" ]] && BUMP="feat"
+                ;;
+              fix)
+                [[ "$BUMP" == "none" ]] && BUMP="fix"
+                ;;
+              *)
+              # chore, docs, ci, refactor, etc - no version bump contribution
+              ;;
+            esac
+          done <<< "$COMMITS"
+
+          if [[ "$BUMP" == "none" ]]; then
+            echo "::error::No commits with fix:, feat: or breaking: prefix found since $LATEST_TAG"
+            echo "Commits found:"
+            echo "$COMMITS"
+            exit 1
+          fi
+
+          echo "Detected bump type: $BUMP"
+
+          ## Apply bump with semver reset rules 
+          case "$BUMP" in
+            breaking)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            feat)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            fix)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          NEW_TAG="${MODULE}-v${NEW_VERSION}"
+
+          echo "New version: ${NEW_VERSION}"
+          echo "New tag:     ${NEW_TAG}"
+          
+          echo "tag_name=$NEW_TAG"       >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$LATEST_TAG"   >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP"               >> "$GITHUB_OUTPUT"
+        
+      # 4. rebuild COMMITS_RAW cleanly for python - avoids multiline env issues
+      - name: Collect raw commits for notes 
+        id: raw_commits
+        env:
+          LATEST_TAG: ${{ steps.compute.outputs.latest_tag }}
+        run: | 
+          set -euo pipefail
+
+          if [[ -z "$LATEST_TAG" ]]; then 
+            RAW=$(git log --first-parent --no-merges \
+              --pretty=format:"%s|||%h|||%an" -20)
+          else
+            RAW=$(git log "${LATEST_TAG}..HEAD" \
+              --first-parent --no-merges \
+              --pretty=format:"%s|||%h|||%an")
+          fi
+
+          {
+            echo "raw_commits<<COMMITS_EOF"
+            echo "$RAW"
+            echo "COMMITS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          
+      # 5. Build release notees
+      - name: Build release notes 
+        id: notes
+        env: 
+          LATEST_TAG:  ${{ steps.compute.outputs.latest_tag }}
+          NEW_VERSION: ${{ steps.compute.outputs.new_version}}
+          BUMP:        ${{ steps.compute.outputs.bump }}
+          MODULE:      ${{ steps.resolve.outputs.module }}
+          RAW_COMMITS: ${{ steps.raw_commits.outputs.raw_commits }}
+        run: | 
+          set -euo pipefail
+          
+          python3 - <<'PYEOF'
+          import os
+
+          raw         = os.environ.get("RAW_COMMITS", "")
+          module      = os.environ.get("MODULE", "")
+          new_version = os.environ.get("NEW_VERSION", "")
+          bump        = os.environ.get("BUMP", "")
+          latest_tag  = os.environ.get("LATEST_TAG", "")
+
+          bump_label = {
+            "breaking": "Major - Breaking change",
+            "feat":     "Minor - new feature",
+            "fix":      "Patch - bug fix",
+            "init":     "Initial release",
+          }.get(bump, bump)
+
+          groups = {"breaking": [], "feat": [], "fix": [], "other": []}
+          
+          for line in raw.strip().splitlines():
+            if not line.strip():
+              continue
+            parts   = line.rsplit("|||")
+            subject = parts[0].strip() if len(parts) > 0 else ""
+            sha     = parts[1].strip() if len(parts) > 1 else ""
+            author  = parts[2].strip() if len(parts) > 2 else ""
+            prefix  = subject.split(":")[0].strip().lower()
+            entry   = f"- {subject} ([`{sha}`](../../commit/{sha})) - {author}"
+
+            if prefix in groups:
+              groups[prefix].append(entry)
+            else:
+              groups["other"].append(entry)
+          
+          lines = [f"## {module} v{new_version}\n"]
+          lines.append(f"> **Bump type:** {bump_label}")
+          if latest_tag:
+            lines.append(f"> **Previous version:** {latest_tag}")
+          lines.append("")
+
+          section_labels = {
+            "breaking": "### Breaking changes",
+            "feat":     "### Features", 
+            "fix":      "### Fixes",
+            "other":    "### Other",
+          }
+
+          for key, label in section_labels.items():
+            if groups[key]:
+              lines.append(label)
+              lines.extend(groups[key])
+              lines.append("")
+          
+          notes = "\n".join(lines)
+          print(notes)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh: 
+            fh.write("notes<<NOTES_EOF\n")
+            fh.write(notes + "\n")
+            fh.write("NOTES_EOF\n")
+          PYEOF
+
+      # 6. Create and push annotated tag 
+      - name: Create and push tag
+        env: 
+          TAG:      ${{ steps.compute.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: | 
+          set -euo pipefail
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Verify tag doesn't already exist 
+          if git rev-parse "$TAG" >/dev/null 2>&1; then 
+            echo "::error::Tag $TAG already exists - aborting to avoid overwrite"
+            exit 1
+          fi
+
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "Pushed tag: $TAG"
+      
+      # 7. Create github release
+      - name: Create github release
+        uses: actions/github-script@v7
+        env:
+          NOTES: ${{ steps.notes.outputs.notes }}
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const tag    = '${{ steps.compute.outputs.tag_name }}';
+            const notes  = process.env.NOTES;
+            const bump   = '${{ steps.compute.outputs.bump }}';
+            const module = '${{ steps.resolve.outputs.module }}';
+
+            const { data } = await github.rest.repos.createRelease({
+              owner:       context.repo.owner, 
+              repo:        context.repo.repo,
+              tag_name:    tag,
+              name:        `${tag}`,
+              body:        notes,
+              prerelease:  false,
+              draft:       false,
+            });
+
+            console.log(`Release created: ${data.html_url}`);
+            
+            await core.summary
+              .addHeading(`Release: ${tag}`)
+              .addTable([
+                [{data: 'Field', header:true}, {data: 'Value', header:true}], 
+                ['TAG',     tag],
+                ['Version', '${{ steps.compute.outputs.new_version }}'], 
+                ['Bump',    bump],
+                ['Release', data.html_url],
+                ['Module',  module],
+              ])
+              .write();
+
