@@ -1,0 +1,126 @@
+name: Deploy to SERVER
+
+on:
+  workflow_call:
+    inputs:
+      module:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      force_full_install:
+        required: false
+        type: boolean
+        default: false
+      archive_name:
+        required: true
+        type: string
+    secrets:
+      SERVER_USERNAME:
+        required: true
+      SERVER_HOST: 
+        required: true
+      SERVER_SSH_KEY:
+        required: true
+    outputs:
+      deployment_id:
+        description: "ID of a deployment"
+        value: ${{ jobs.deploy.outputs.deployment_id }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      deployment_id: ${{ steps.deploy_step.outputs.deployment_id }}
+
+    steps:
+      - name: Debug input 
+        run: |
+          echo "Input MODULE: ${{ inputs.module }}"
+          echo "Input ENVIRONMENT: ${{ inputs.environment }}"
+          echo "Input FORCE_INSTALL: ${{ inputs.force_full_install }}"
+          echo "Input ARCHIVE_NAME: ${{ inputs.archive_name }}"
+
+      - name: Checkout code (for deploy.sh)
+        uses: actions/checkout@v3
+        
+      - name: Download deployment archive
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-archive
+          path: .
+      
+      - name: Rename downloaded archive to match input
+        run : |
+          echo "Looking for archive to match : ${{ inputs.archive_name }}"
+          FOUND_FILE=$( find . -name '*_deployment.tar.gz' | head -n 1 )
+          echo "Found file: $FOUND_FILE"
+
+      - name: Set up SSH access
+        run: |
+          mkdir -p ~/.ssh 
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
+        env: 
+          SERVER_HOST: ${{ secrets.SERVER_HOST }} 
+      
+      - name: Deploy to SERVER
+        env: 
+          MODULE: ${{ inputs.module }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          FORCE_INSTALL: ${{ inputs.force_full_install }}
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          ARCHIVE: ${{ inputs.archive_name }}
+
+        id: deploy_step
+        run: |
+          set -e 
+
+          echo "DEBUG - SERVER_USER: [${SERVER_USER}]"
+          echo "DEBUG - SERVER_HOST: [${SERVER_HOST}]"
+          echo "DEBUG - MODULE: [${MODULE}]"
+          echo "DEBUG - ENVIRONMENT: [${ENVIRONMENT}]"
+          echo "DEBUG - FORCE_INSTALL: [${FORCE_INSTALL}]"
+          echo "DEBUG - ARCHIVE NAME: [${ARCHIVE}]"
+
+          DEPLOYMENT_ID="deploy_${GITHUB_RUN_ID}_$(date +%Y%m%d_%H%M%S)"
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "export MODULE_NAME=\"$MODULE\"" > deploy_env.sh
+          echo "export ENVIRONMENT=\"$ENVIRONMENT\"" >> deploy_env.sh
+          echo "export DEPLOYMENT_ID=\"$DEPLOYMENT_ID\"" >> deploy_env.sh
+          echo "export FORCE_INSTALL=\"$FORCE_INSTALL\"" >> deploy_env.sh
+
+          chmod +x deploy_env.sh
+          chmod +x .github/workflows/deploy.sh
+
+          # Transfer archive and env
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -v "$ARCHIVE" deploy_env.sh .github/workflows/deploy.sh "$SERVER_USER@$SERVER_HOST":~/
+
+          # Remote deploy execution 
+          ssh "$SERVER_USER@$SERVER_HOST" <<'EOF'
+            set -e 
+            echo "Running deployment on SERVER..."
+
+            echo "Files in home before deploy:"
+            ls -lh ~/
+
+            source ~/deploy_env.sh
+            echo "Executing deploy.sh with:"
+            echo "  MODULE_NAME=$MODULE_NAME"
+            echo "  ENVIRONMENT=$ENVIRONMENT"
+            echo "  DEPLOYMENT_ID=$DEPLOYMENT_ID"
+            echo "  FORCE_INSTALL=$FORCE_INSTALL"
+
+            bash ~/deploy.sh "$MODULE_NAME" "$ENVIRONMENT" "$DEPLOYMENT_ID" "$FORCE_INSTALL"
+
+            echo "Cleaning up..."
+            rm -rf ~/deploy_env.sh ~/deploy.sh ~/"\$MODULE_NAME"_deployment.tar.gz
+
+            echo "Files in home after clearnup:"
+            ls -lh ~/
+          EOF
+
+          echo "Remote deployment complete"
