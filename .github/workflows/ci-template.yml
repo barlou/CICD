@@ -1,0 +1,282 @@
+name: CI/CD Pipeline
+
+on: 
+  # Production flow - triggered by merge to main 
+  push:
+    branches:
+      - main
+      - release
+
+  # Manual trigger - INT, UAT, or forced production deploy 
+  workflow_dispatch:
+    inputs:
+      environment: 
+        description: "Target environment"
+        required: true
+        type: choice 
+        options:
+          - INT
+          - UAT 
+          - production 
+      module:
+        description: "Module name (leave empty to derive from repo name)"
+        required: false
+        type: string
+        default: ""
+      force_jars:
+        description: "Force redownload jars even if version matches"
+        required: false
+        type: boolean
+        default: false
+      force_tools: 
+        description: "Force reinstall tools even if version matches"
+        required: false
+        type: boolean
+        default: false
+      force_airflow:
+        description: "Force redeploy airflow even if version matches"
+        required: false
+        type: boolean
+        default: false
+      gitleaks_allow_failure:
+        description: "Allow gitleaks to fail without blocking (emergency only)"
+        required: false
+        type: boolean
+        default: false
+      semgrep_allow_failure:
+        description: "Allow semgrep to fail without blocking (emergency only)"
+        required: false
+        type: boolean
+        default: false
+      pip_audit_allow_failure:
+        description: "Allow pip-audit to fail without blocking (emergency only)"
+        required: false
+        type: boolean
+        default: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concurrency — prevent overlapping deploys on the same branch
+# ─────────────────────────────────────────────────────────────────────────────
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a runnning deploy - let it finish
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RELEASE FLOW — push to release branch
+# Runs security gate, merges to main if passed
+# Production deploy + tag triggered by the resulting push to main
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # Security gate (release branch only)
+  security:
+    name: Security gate
+    if: github.ref == 'refs/heads/release'
+    uses: barlou/CICD/.github/workflows/_security.yml@main
+    with:
+      gitleaks_allow_failure:  ${{ inputs.gitleaks_allow_failure || false }}
+      semgrep_allow_failure:   ${{ inputs.semgrep_allow_failure || false }}
+      pip_audit_allow_failure: ${{ inputs.pip_audit_allow_failure || false }}
+    secrets: inherit 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRODUCTION FLOW — push to main (after security gate merged release → main)
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # Build
+  build:
+    name: Build deployment package 
+    if: | 
+      github.ref == 'refs/heads/main' && 
+      github.event_name == 'push'
+    uses: barlou/CICD/.github/workflows/_build.yml@main
+    with:
+      module:        ${{ inputs.module || '' }}
+      force_jars:    ${{ inputs.force_jars || false }}
+      force_tools:   ${{ inputs.force_tools || false }}
+      force_airflow: ${{ inputs.force_airflow || false }}
+    secrets: inherit
+  
+  # Deploy in production 
+  deploy-prod:
+    name: Deploy - production 
+    needs: build
+    if: |
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push'
+    uses: barlou/CICD/.github/workflows/_deploy.yml@main
+    with:
+      module: ${{ needs.build.outputs.module_name }}
+      environment: production
+      archive_name: ${{ needs.build.outputs.archive_name }}
+      skip_tools: ${{ needs.build.outputs.skip_tools == 'true' }}
+      skip_airflow: ${{ needs.build.outputs.skip_airflow == 'true' }}
+      need_jars: ${{ needs.build.outputs.need_jars || 'true' }}
+      need_tools: ${{ needs.build.outputs.need_tools || 'true' }}
+      need_airflow: ${{ needs.build.outputs.need_airflow || 'true' }}
+      need_method: ${{ needs.build.outputs.need_method || 'true' }}
+      jars_version: ${{ needs.build.outputs.jars_version || '' }}
+      tools_version: ${{ needs.build.outputs.tools_version || '' }}
+      airflow_version: ${{ needs.build.outputs.airflow_version || '' }}
+    secrets: inherit 
+  
+  verify-prod:
+    name: Verify production
+    needs: [build, deploy-prod]
+    if: | 
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push'
+    uses: barlou/CICD/.github/workflows/_verify.yml@main
+    with: 
+      module: ${{ needs.build.outputs.module_name }}
+      deployment_id: ${{ needs.deploy-prod.outputs.deployment_id }}
+      skip_tools: ${{ needs.build.outputs.skip_tools == 'true' }}
+      skip_airflow: ${{ needs.build.outputs.skip_airflow == 'true' }}
+      need_jars: ${{ needs.build.outputs.need_jars || 'true' }}
+      need_tools: ${{ needs.build.outputs.need_tools || 'true' }}
+      need_airflow: ${{ needs.build.outputs.need_airflow || 'true' }}
+      need_method: ${{ needs.build.outputs.need_method || 'true' }}
+      jars_version: ${{ needs.build.outputs.jars_version || '' }}
+      tools_version: ${{ needs.build.outputs.tools_version || '' }}
+      airflow_version: ${{ needs.build.outputs.airflow_version || '' }}
+      airflow_id: ${{ needs.build.outputs.airflow_id || '' }}
+      ssm_prefix: ${{ needs.build.outputs.ssm_prefix || '' }}
+    secrets: inherit 
+
+# Release - tag + release notes
+  release:
+    name: Release - tag and changelog
+    needs: [build, deploy-prod, verify-prod]
+    if: | 
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      needs.verify-prod.outputs.verify_status == 'success'
+    uses: barlou/CICD/.github/workflows/_release.yml@main
+    with:
+      module: ${{ needs.build.outputs.module_name }}
+    secrets: inherit
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INT FLOW — manual trigger, environment = INT
+# ─────────────────────────────────────────────────────────────────────────────
+
+  build-int:
+    name: Build - INT
+    if: |
+      github.event_name == 'workflow_dispatch' && 
+      inputs.environment == 'INT'
+    uses: barlou/CICD/.github/workflows/_build.yml@main
+    with:
+      module:        ${{ inputs.module || '' }}
+      force_jars:    ${{ inputs.force_jars || false }}
+      force_tools:   ${{ inputs.force_tools || false }}
+      force_airflow: ${{ inputs.force_airflow || false }}
+    secrets: inherit 
+  
+  deploy-int: 
+    name: Deploy - INT
+    needs: build-int
+    if: | 
+      github.event_name == 'workflow_dispatch' && 
+      inputs.environment == 'INT'
+    uses: barlou/CICD/.github/workflows/_deploy.yml@main
+    with: 
+      module:          ${{ needs.build-int.outputs.module_name }}
+      environment:     INT
+      archive_name:    ${{ needs.build-int.outputs.archive_name }}
+      skip_tools:      ${{ needs.build-int.outputs.skip_tools == 'true' }}
+      skip_airflow:    ${{ needs.build-int.outputs.skip_airflow == 'true' }}
+      need_jars:       ${{ needs.build.outputs.need_jars == 'true' }}
+      need_tools:      ${{ needs.build.outputs.need_tools == 'true' }}
+      need_airflow:    ${{ needs.build.outputs.need_airflow == 'true' }}
+      need_method:     ${{ needs.build.outputs.need_method == 'true' }}
+      jars_version:    ${{ needs.build-int.outputs.jars_version || '' }}
+      tools_version:   ${{ needs.build-int.outputs.tools_version || '' }}
+      airflow_version: ${{ needs.build-int.outputs.airflow_version || '' }}
+    secrets: inherit
+
+  verify-int:
+    name: Verify — INT
+    needs: [build-int, deploy-int]
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      inputs.environment == 'INT'
+    uses: barlou/CICD/.github/workflows/_verify.yml@main
+    with:
+      module:          ${{ needs.build-int.outputs.module_name }}
+      deployment_id:   ${{ needs.deploy-int.outputs.deployment_id }}
+      need_jars:       ${{ needs.build-int.outputs.need_jars == 'true' }}
+      need_tools:      ${{ needs.build-int.outputs.need_tools == 'true' }}
+      need_airflow:    ${{ needs.build-int.outputs.need_airflow == 'true' }}
+      need_method:     ${{ needs.build-int.outputs.need_method == 'true' }}
+      skip_tools:      ${{ needs.build-int.outputs.skip_tools == 'true' }}
+      skip_airflow:    ${{ needs.build-int.outputs.skip_airflow == 'true' }}
+      jars_version:    ${{ needs.build-int.outputs.jars_version || '' }}
+      tools_version:   ${{ needs.build-int.outputs.tools_version || '' }}
+      airflow_version: ${{ needs.build-int.outputs.airflow_version || '' }}
+      airflow_id:      ${{ needs.build-int.outputs.airflow_id || '' }}
+      ssm_prefix:      ${{ needs.build-int.outputs.ssm_prefix || '' }}
+    secrets: inherit
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UAT FLOW — manual trigger, environment = UAT
+# ─────────────────────────────────────────────────────────────────────────────
+
+  build-uat:
+    name: Build — UAT
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      inputs.environment == 'UAT'
+    uses: barlou/CICD/.github/workflows/_build.yml@main
+    with:
+      module:        ${{ inputs.module || '' }}
+      force_jars:    ${{ inputs.force_jars    || false }}
+      force_tools:   ${{ inputs.force_tools   || false }}
+      force_airflow: ${{ inputs.force_airflow || false }}
+    secrets: inherit
+
+  deploy-uat:
+    name: Deploy — UAT
+    needs: build-uat
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      inputs.environment == 'UAT'
+    uses: barlou/CICD/.github/workflows/_deploy.yml@main
+    with:
+      module:          ${{ needs.build-uat.outputs.module_name }}
+      environment:     UAT
+      archive_name:    ${{ needs.build-uat.outputs.archive_name }}
+      skip_tools:      ${{ needs.build-uat.outputs.skip_tools == 'true' }}
+      skip_airflow:    ${{ needs.build-uat.outputs.skip_airflow == 'true' }}
+      need_jars:       ${{ needs.build-uat.outputs.need_jars || 'true' }}
+      need_tools:      ${{ needs.build-uat.outputs.need_tools || 'true' }}
+      need_airflow:    ${{ needs.build-uat.outputs.need_airflow || 'true' }}
+      need_method:     ${{ needs.build-uat.outputs.need_method || 'true' }}
+      jars_version:    ${{ needs.build-uat.outputs.jars_version || '' }}
+      tools_version:   ${{ needs.build-uat.outputs.tools_version || '' }}
+      airflow_version: ${{ needs.build-uat.outputs.airflow_version || '' }}
+    secrets: inherit
+
+  verify-uat:
+    name: Verify — UAT
+    needs: [build-uat, deploy-uat]
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      inputs.environment == 'UAT'
+    uses: barlou/CICD/.github/workflows/_verify.yml@main
+    with:
+      module:          ${{ needs.build-uat.outputs.module_name }}
+      deployment_id:   ${{ needs.deploy-uat.outputs.deployment_id }}
+      need_jars:       ${{ needs.build-uat.outputs.need_jars == 'true' }}
+      need_tools:      ${{ needs.build-uat.outputs.need_tools == 'true' }}
+      need_airflow:    ${{ needs.build-uat.outputs.need_airflow == 'true' }}
+      need_method:     ${{ needs.build-uat.outputs.need_method == 'true' }}
+      skip_tools:      ${{ needs.build-uat.outputs.skip_tools == 'true' }}
+      skip_airflow:    ${{ needs.build-uat.outputs.skip_airflow == 'true' }}
+      jars_version:    ${{ needs.build-uat.outputs.jars_version || '' }}
+      tools_version:   ${{ needs.build-uat.outputs.tools_version || '' }}
+      airflow_version: ${{ needs.build-uat.outputs.airflow_version || '' }}
+      airflow_id:      ${{ needs.build-uat.outputs.airflow_id || '' }}
+      ssm_prefix:      ${{ needs.build-uat.outputs.ssm_prefix || '' }}
+    secrets: inherit

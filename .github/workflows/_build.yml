@@ -1,0 +1,773 @@
+name: Building deployment package 
+
+on: 
+  workflow_call:
+    inputs:
+      module: 
+        required: true
+        type: string
+      custom_src_subfolder: 
+        required: false 
+        type: string
+        default: ""
+      include_jars:
+        required: false
+        type: boolean
+        default: false
+      include_method:
+        required: false
+        type: boolean 
+        default: true
+      config_template_path:
+        required: false
+        type: string
+        default: "config/config.template.json"
+    secrets:
+      SERVER_HOST:
+        required: true
+      SERVER_USERNAME:
+        required: true
+      SERVER_SSH_KEY:
+        required: true
+      GH_TOKEN:
+        required: false
+    outputs:
+      archive_name:
+        value: ${{ jobs.build.outputs.archive_name }}
+      module_name:
+        value: ${{ jobs.build.outputs.module_name }}
+      skip_tools:
+        value: ${{ jobs.build.outputs.skip_tools }}
+      skip_airflow:
+        value: ${{ jobs.build.outputs.skip_airflow }}
+      need_jars:
+        value: ${{ jobs.build.outputs.need_jars }}
+      need_tools:
+        value: ${{ jobs.build.outputs.need_tools }}
+      need_airflow:
+        value: ${{ jobs.build.outputs.need_airflow }}
+      need_method:
+        value: ${{ jobs.build.outputs.need_method }}
+      jars_version:
+        value: ${{ jobs.build.outputs.jars_version }}
+      tools_version:
+        value: ${{ jobs.build.outputs.tools_version }}
+      airflow_version:
+        value: ${{ jobs.build.outputs.airflow_version }}
+      airflow_id:
+        value: ${{ jobs.build.outputs.airflow_id }}
+      ssm_prefix:
+        value: ${{ jobs.build.outputs.ssm_prefix }}
+      secrets_map:
+        value: ${{ jobs.build.outputs.secrets_map }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      archive_name:    ${{ steps.package.outputs.archive_name }}
+      module_name:     ${{ steps.resolve.outputs.module }}
+      skip_tools:      ${{ steps.server_check.outputs.skip_tools }}
+      skip_airflow:    ${{ steps.server_check.outputs.skip_airflow }}
+      need_jars:       ${{ steps.cfg.outputs.need_jars }}
+      need_tools:      ${{ steps.cfg.outputs.need_tools }}
+      need_airflow:    ${{ steps.cfg.outputs.need_airflow }}
+      need_method:     ${{ steps.cfg.outputs.need_method }}
+      jars_version:    ${{ steps.cfg.outputs.jars_version }}
+      tools_version:   ${{ steps.cfg.outputs.tools_version }}
+      airflow_version: ${{ steps.cfg.outputs.airflow_version }}
+      airflow_id:      ${{ steps.cfg.outputs.airflow_id }}
+      ssm_prefix:      ${{ steps.cfg.outputs.ssm_prefix }}
+    
+    steps:
+      # 1. Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 1
+
+      # 2. Resolve module name
+      - name: Resolve module name 
+        id: resolve
+        run: | 
+          set -euo pipefail
+
+          MODULE="${{ inputs.module }}"
+
+          if [[ -z "$MODULE" ]]; then
+            REPO="${{ github.repository }}"
+            MODULE="${REPO##*/}"
+            echo "No module input - derived from repo name: $MODULE"
+          fi
+
+          MODULE=$(echo "$MODULE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          echo "Resolved module: $MODULE"
+          echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+
+      # 3. Read cicd.config.yml
+      - name: Read cicd.config.yml
+        id: cfg
+        run: | 
+          set -euo pipefail
+          CONFIG_FILE="cicd.config.yml"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::cicd.config.yml not found at repo root."
+            echo "Each app repo must declare its own cicd.config.yml"
+            exit 1
+          fi
+
+          python3 - <<'PYEOF'
+          import yaml, json, os, sys
+
+          with open("cicd.config.yml") as fetch-depth:
+            cfg = yaml.safe_load(f)
+
+          components  = cfg.get("components", {})
+          update      = cfg.get("update", {})
+          tmpl        = cfg.get("config_template", {})
+          secrets_map = cfg.get("secrets_map", {})
+
+          jars_cfg    = components.get("jars", {}) 
+          airflow_cfg = components.get("airflow", {})
+          tools_cfg   = components.get("tools", {})
+          method_cfg  = components.get("method", {})
+
+          def out(key, val):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"{key}={val}\n")
+          
+          # jars 
+          out("need_jars",    str(jars_cfg.get("enabled",      True)).lower())
+          out("jars_version", str(jars_cfg.get("version",      "")))
+          out("jars_files",   json.dumps(jars_cfg.get("files", {})))
+          out("force_jars",   str(update.get("force_jars",     False)).lower())
+
+          # airflow
+          out("need_airflow",    str(airflow_cfg.get("enabled", True)).lower())
+          out("airflow_version", str(airflow_cfg.get("version", "")))
+          out("airflow_repo",    str(airflow_cfg.get("repo", "")))
+          out("airflow_id",      str(airflow_cfg.get("instance_id", "")))
+          out("force_airflow",   str(update.get("force_airflow", False)).lower())
+
+          # tools/utils
+          out("need_tools",    str(tools_cfg.get("enabled",  True)).lower())
+          out("tools_version", str(tools_cfg.get("version",  "")))
+          out("tools_repo",    str(tools_cfg.get("repo",    "")))
+          out("force_tools",   str(update.get("force_tools", False)).lower())
+          
+          # method/business
+          out("need_method", str(method_cfg.get("enabled", True)).lower())
+
+          # config template + secrets
+          out("template_path",  tmpl.get("path", "") if isinstance(tmpl, dict) else "")
+          out("secrets_map",    json.dumps(secrets_map))
+          out("ssm_prefix",     cfg.get("ssm_prefix", ""))
+
+          print("cicd.config.yml parsed ok.")
+          print(f"  jars     : enabled={jars_cfg.get('enabled', True)}, version={jars_cfg.get('version', 'unset')}, files={list(jars_cfg.get('files', {}).keys())}")
+          print(f"  airflow  : enabled={airflow_cfg.get('enabled', True)}, version={airflow_cfg.get('version', 'unset')}")
+          print(f"  tools    : enabled={tools_cfg.get('enabled', True)}, version={tools_cfg.get('version', 'unset')}")
+          print(f"  method   : enabled={method_cfg.get('enabled', True)}")
+          print(f"  template path :{tmpl.get('path', '<none>') if isinstance(tmpl, dict) else '<non>'}")
+          print(f"  secrets mapped:{list(secrets_map.keys())}")
+          PYEOF
+      
+      # 4. Preflight - validated structure and template 
+      - name: Preflight - validated structure and template 
+        id: preflight 
+        run: | 
+          set -euo pipefail
+
+          MODULE="${{ steps.resolve.outputs.module }}"
+          ERRORS=()
+          WARNINGS=()
+
+          echo "=== Preflight for module: $MODULE ==="
+
+          # src directory 
+          if [ ! -d "$MODULE/src" ]; then
+            ERRORS+=("Missing src directory: $MODULE/src")
+          else
+            FILE_COUNT=$(find "$MODULE/src" -type f | wc -l)
+            if [ "$FILE_COUNT" -eq 0 ]; then
+              WARNINGS+=("$MODULE/src exists but contains no files.")
+            else
+              echo "  [OK] src - $FILE_COUNT file(s)."
+            fi
+          fi
+
+          # Tests (optional)
+          if [ ! -d "$MODULE/tests" ]; then 
+            WARNINGS+=("No tests/ found at $MODULE/tests - skipping tests copy")
+          else 
+            echo "  [OK] tests/"
+          fi
+
+          # jars 
+          if [[ "${{ steps.cfg.outputs.need_jars }}" == "true" ]]; then
+            JARS_FILES="${{ steps.cfg.outputs.jars_files }}"
+            if [[ "$JARS_FILES" == "{}" || -z "$JARS_FILES" ]]; then 
+              ERRORS+=("components.jars.enabled=true but no files declared in cicd.config.yml")
+            elif [[ -z "${{ steps.cfg.outputs.jars_version }}" ]]; then
+              ERRORS+=("components.jars.version not set in cicd.config.yml")
+            else
+              echo "  [OK] jars declared - version ${{ steps.cfg.outputs.jars_version }}"
+            fi
+          else
+            echo "  [SKIP] jars not required"
+          fi
+
+          # Airflow schedule 
+          if [[ "${{ steps.cfg.outputs.need_airflow }}" == "true" ]]; then 
+            [[ -z "${{ steps.cfg.outputs.airflow_version }}" ]] \ 
+              && ERRORS+=("components.airflow.version not set in cicd.config.yml")
+            [[ -z "${{ steps.cfg.outputs.airflow_repo }}" ]] \
+              && ERRORS+=("components.airflow.repo not set in cicd.config.yml")
+            [[ -z "${{ steps.cfg.outputs.airflow_id }}" ]] \
+              && ERRORS+=("components.airflow.instance_id is not set in cicd.config.yml")
+            [[ ${#ERRORS[@]} -eq 0 ]] \
+              && echo "  [OK] airflow declared - version ${{ steps.cfg.outputs.airflow_version }}"
+          else
+            echo "  [SKIP] airflow not required"
+          fi
+
+          # tools
+          if [[ "${{ steps.cfg.outputs.need_tools }}" == "true" ]]; then
+            [[ -z "${{ steps.cfg.outputs.tools_version }}" ]] \
+              && ERRORS+=("components.tools.version not set in cicd.config.yml")
+            [[ -z "${{ steps.cfg.outputs.tools_repo }}" ]] \
+              && ERRORS+=("components.tools.repo not set in cicd.config.yml")
+            [[ ${#ERRORS[@]} -eq 0 ]] \
+              && echo "  [OK] tools declared - version ${{ steps.cfg.outputs.tools_version }}"
+          else
+            echo "  [SKIP] tools not required"
+          fi
+
+          # Config template 
+          TMPL="${{ steps.cfg.outputs.template_path }}"
+          if [[ -z "$TMPL" ]]; then
+            ERRORS+=("config_template.path not declared - each repo must own its template")
+          elif [ ! -f "$TMPL" ]; then
+            ERRORS+=("config_template.path='TMPL' declared but file not found")
+          else
+            python3 - <<PYEOF
+          import re, json, sys
+
+          raw = open("$TMPL").read()
+          stripped = re.sub(r'"?\{\{\s*\w+\s*\}\}"?', '"__p__"', raw)
+          stripped = re.sub(r'"\s*__p__\s*"(?=\s*[,}\]])', '"__p__"', stripped)
+          try:
+            json.loads(stripped)
+            print("  [OK] template JSON structure valid")
+          except json.JSONDecodeError as e:
+            print(f"::error::config.template.json invalid json: {e}")
+            sys.exit(1)
+          PYEOF
+
+            python3 - <<PYEOF
+          import re, json
+
+          raw          = open("$TMPL").read()
+          placeholders = set(re.findall(r'\{\{\s*\w+\s*\}\}', raw))
+          auto         = {"MODULE", "DEPLOYMENT_DATE"}
+          needs_map    = placeholders - auto
+          mapped       = set(json.loads('${{ steps.cfg.outputs.secrets_map }}').keys())
+          unmapped     = needs_map - mapped
+
+          for u in sorted(unmapped):
+            print(f"::warning::{{{{ {u} }}}} in template not found in secrets_map")
+          if not unmapped:
+            print(f"  [OK] all {len(needs_map)} placeholder(s) covered by secrets_map")
+          PYEOF
+          fi
+
+          # Report
+          echo ""
+          for w in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do echo "::warning::$w"; done
+
+          if [ ${#ERRORS[@]} -gt 0 ]; then
+            echo "=== Preflight FAILED ==="
+            for e in "${ERRORS[@]}"; do echo "::error::$e"; done
+            exit 1
+          fi
+
+          echo "=== Preflight passed ==="
+      
+      # 5. Setup ssh 
+      - name: Setup ssh
+        run: |
+          mkdir -p ~/.ssh
+          install -m 600 /dev/stdin ~/.ssh/id_rsa <<< "${{ secrets.SERVER_SSH_KEY }}"
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+
+      # 6. Server version check - jars, tools, airflow, others...
+      - name: Server version check 
+        id: server_check 
+        env: 
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          NEED_JARS:   ${{ steps.cfg.outputs.need_jars }}
+          JARS_VERSION:    ${{ steps.cfg.outputs.jars_version }}
+          JARS_FILES_JSON: ${{ steps.cfg.outputs.jars_files }}
+          FORCE_JARS:      ${{ steps.cfg.outputs.force_jars }}
+          NEED_TOOLS:      ${{ steps.cfg.outputs.need_tools }}
+          TOOLS_VERSION:   ${{ steps.cfg.outputs.tools_version }}
+          FORCE_TOOLS:     ${{ steps.cfg.outputs.force_tools }}
+          NEED_AIRFLOW:    ${{ steps.cfg.outputs.need_airflow }}
+          AIRFLOW_VERSION: ${{ steps.cfg.outputs.airflow_version }}
+          FORCE_AIRFLOW:   ${{ steps.cfg.outputs.force_airflow }}
+        run: |
+          SERVER_STATE=$(ssh "$SERVER_USER@$SERVER_HOST" bash <<'REMOTE'
+            set -euo pipefail
+            DEPLOY_BASE=~/deployments
+
+            # jars: emit version file content or MISSING
+            if [ -f "$DEPLOY_BASE/jars/VERSION" ]; then
+              JARS_SERVER=$(cat "$DEPLOY_BASE/jars/VERSION")
+            else
+              JARS_SERVER="MISSING"
+            fi
+
+            # tools/utils: emit version file content or MISSING
+            if [ -f "$DEPLOY_BASE/utils/VERSION" ]; then
+              UTILS_SERVER=$(cat "$DEPLOY_BASE/utils/VERSION")
+            else
+              UTILS_SERVER="MISSING"
+            fi
+
+            # airflow: emit version file content or MISSING
+            if [ -f "$DEPLOY_BASE/airflow/VERSION" ]; then 
+              AIRFLOW_SERVER=$(cat "$DEPLOY_BASE/airflow/VERSION")
+            else 
+              AIRFLOW_SERVER="MISSING"
+            fi
+
+            echo "JARS_SERVER=$JARS_SERVER"
+            echo "UTILS_SERVER=$UTILS_SERVER"
+            echo "AIRFLOW_SERVER=$AIRFLOW_SERVER"
+          REMOTE
+          )
+          
+          echo "Server stat:"
+          echo "$SERVER_STATE"
+
+          # parse server state info local vars
+          eval "$SERVER_STATE"
+
+          # jars: determine which files need downloading 
+          JARS_TO_DOWNLOAD="{}"
+          SKIP_JARS="false"
+
+          if [[ "$NEED_JARS" == "true" ]]; then 
+            if [[ "$FORCE_JARS" == "true" ]]; then
+              echo "  [JARS] force=true - downloading all jars"
+              JARS_TO_DOWNLOAD="$JARS_FILES_JSON"
+            elif [[ "$JARS_SERVER" == "$JARS_VERSION" ]]; then 
+              echo "  [JARS] server version $JARS_SERVER matches $JARS_VERSION - skip all"
+              SKIP_JARS="true"
+            else
+              echo "  [JARS] server=$JARS_SERVER required=$JARS_VERSION - downloading all"
+              JARS_TO_DOWNLOAD="$JARS_FILES_JSON"
+            fi
+          fi
+
+          # tools: skip flag 
+          SKIP_TOOLS="false"
+          if [[ "$NEED_TOOLS" == "true" ]]; then 
+            if [[ "$FORCE_TOOLS" == "true" ]]; then 
+              echo "  [TOOLS] force=true - will reinstall"
+            elif [[ "$UTILS_SERVER" == "$TOOLS_VERSION" ]]; then  
+              echo "  [TOOLS] server version $UTILS_VERSION matches $TOOLS_VERSION - skip"
+              SKIP_TOOLS="true"
+            else
+              echo "  [TOOLS] server=$SERVER_UTILS required=$TOOLS_VERSION - will install"
+            fi
+          fi 
+
+          # airflow: skip flag 
+          SKIP_AIRFLOW="false"
+          if [[ "$NEED_AIRFLOW" == "true" ]]; then 
+            if [[ "$FORCE_AIRFLOW" == "true" ]]; then 
+              echo "  [AIRFLOW] force=true - will redeploy"
+            elif [[ "$AIRFLOW_SERVER" == "$AIRFLOW_VERSION" ]]; then 
+              echo "  [AIRFLOW] server version $AIRFLOW_SERVER matches $AIRFLOW_VERSION - skip"
+              SKIP_AIRFLOW="true"
+            else
+              echo "  [AIRFLOW] server=$AIRFLOW_SERVER required=$AIRFLOW_VERSION - will deploy"
+            fi
+          fi
+
+          echo "jars_to_download=$JARS_TO_DOWNLOAD" >> "$GITHUB_OUTPUT"
+          echo "skip_jars=$SKIP_JARS"               >> "$GITHUB_OUTPUT"
+          echo "skip_tools=$SKIP_TOOLS"             >> "$GITHUB_OUTPUT"
+          echo "skip_airflow=$SKIP_AIRFLOW"         >> "$GITHUB_OUTPUT"
+
+      # 7. Download jars via wget 
+      - name: Download jars
+        if : | 
+          steps.cfg.outputs.need_jars == 'true' &&
+          steps.server_check.outputs.skip_jars == 'false'
+        run: |
+          set -euo pipefail
+
+          mkdir -p jars
+          JARS_JSON='${{ steps.server_check.outputs.jars_to_download }}'
+
+          echo "=== Downloading jars ==="
+          python3 <<PYEOF
+          import json, subprocess, sys, os 
+
+          jars = json.loads(os.environ.get("JARS_JSON", "{}") or "{}")
+          if not jars:
+            print("No jars to download")
+            sys.exit(0)
+
+          for name, url in jars.items():
+            dest = f"jars/{name}.jar"
+            print(f"  wget {name} -> {dest}")
+            result = subprocess.run(
+              ["wget", "--quiet", "--show-progress", "-O", dest, url],
+              capture_output=False
+            )
+            if result.returncode != 0:
+              print(f"::error::Failed to download jars: {name} from {url}")
+              sys.exit(1)
+            print(f"  [OK] {dest}")
+          print(f"Downloaded {len(jars)} jar(s)")
+          PYEOF
+        env:
+          JARS_JSON: ${{ steps.server_check.outputs.jars_to_download }}
+
+      # 8. Build package 
+      - name: Build package
+        id: package
+        env:
+          GH_TOKEN: "${{ secrets.GH_TOKEN }}"
+        run: | 
+          set -euo pipefail
+
+          MODULE="${{ steps.resolve.outputs.module }}"
+          TMPL="${{ steps.cfg.outputs.template_path }}"
+          NEED_JARS="${{ steps.cfg.outputs.need_jars }}"
+          SKIP_JARS="${{ steps.server_check.outputs.skip_jars }}"
+          NEED_AIRFLOW="${{ steps.cfg.outputs.need_airflow }}"
+          SKIP_AIRFLOW="${{ steps.server_check.outputs.skip_airflow }}"
+          NEED_TOOLS="${{ steps.cfg.outputs.need_tools }}"
+          SKIP_TOOLS="${{ steps.server_check.outputs.skip_tools }}"
+          NEED_METHOD="${{ steps.cfg.outputs.need_method }}"
+          TOOLS_REPO="${{ steps.cfg.outputs.tools_repo }}"
+          TOOLS_VERSION="${{ steps.cfg.outputs.tools_version }}"
+          AIRFLOW_REPO="${{ steps.cfg.outputs.airflow_repo }}"
+          AIRFLOW_VERSION="${{ steps.cfg.outputs.airflow_version }}"
+
+          DEPLOY_DIR="deployment"
+          MODULE_DIR="$DEPLOY_DIR/$MODULE"
+          ARCHIVE_NAME="${MODULE}_deployment.tar.gz"
+
+          echo "=== Building: $MODULE -> $ARCHIVE_NAME ==="
+          rm -rf "$DEPLOY_DIR" "$ARCHIVE_NAME"
+          mkdir -p "$MODULE_DIR/config" "$MODULE_DIR/src" "$MODULE_DIR/tests"
+
+          # Config template - credential-free, rendered on server at deploy time 
+          cp "$TMPL" "$MODULE_DIR/config/config.template.json"
+          echo "  [ŒK] config template copied."
+
+          # src
+          find "$MODULE/src" -type f | while IFS= read -r f; do 
+            rel="${f#$MODULE/src/}"
+            dest="$MODULE_DIR/src/$rel"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+          echo "  [OK] are copied"
+
+          # tests
+          if [ -d "$MODULE/tests" ]; then 
+            cp -r "$MODULE/tests/." "$MODULE_DIR/tests/"
+            echo "  [OK] tests copied"
+          fi
+
+          # jars - already downloaded in step 7, just compress
+          if [[ "$NEED_JARS" == "true" && "$SKIP_JARS" == "false" ]]; then 
+            if [ -d "jars" ] && [ "$(find jars -name '*.jar' | wc -l)" -gt 0 ]; then 
+              tar -czf "$DEPLOY_DIR/jars.tar.gz" jars/
+              # Write version file into archive so server can track it 
+              echo "${{ steps.cfg.outputs.jars_version }}" > /tmp/jars_VERSION
+              tar -rf "$DEPLOY_DIR/jars.tar.gz" -C /tmp jars_VERSION 2>/dev/null || true 
+              echo "  [OK] jars.tar.gz created (version ${{ steps.cfg.outputs.jars_version }})"
+            else
+              echo "::error::jars/ directory empty after download step"
+              exit 1
+            fi 
+          elif [[ "$SKIP_JARS" == "true" ]]; then
+            echo "  [SKIP] jars - server already on version ${{ steps.cfg.outputs.jars_version }}"
+          fi
+
+          # tools/utils - fetch from TOOLS repo at pinned tag, skip if version matches 
+          if [[ "$NEED_TOOLS" == "true" && "$SKIP_TOOLS" == "false" ]]; then 
+            echo "  Fetching tools from $TOOLS_REPO@$TOOLS_VERSION"
+            mkdir -p /tmp/tools_fetch 
+            git clone \
+              --depth 1 \
+              --branch "$TOOLS_VERSION" \ 
+              "https://x-access-token:${GH_TOKEN}@github.com/$TOOLS_REPO.git" \
+              /tmp/tools_fetch
+            mkdir -p "$DEPLOY_DIR/utils"
+            cp -r /tmp/tools_fetch/. "$DEPLOY_DIR/utils/"
+            # Write version so server can track it 
+            echo "$TOOLS_VERSION" > "$DEPLOY_DIR/utils/VERSION"
+            echo " [OK] utils/ fetched at $TOOLS_VERSION"
+          elif [[ "$SKIP_TOOLS" == "true" ]]; then 
+            echo "  [SKIP] tools - server already on version ${{ steps.cfg.outputs.tools_version }}"
+          fi 
+
+          # airflow - fetch from airflow repo at pinned tag, skip if version matches 
+          if [[ "$NEED_AIRFLOW" == "true" && "$SKIP_AIRFLOW" == "false" ]]; then
+            echo "  Fetching airflow from $AIRFLOW_REPO@$AIRFLOW_VERSION"
+            mkdir -p /tmp/airflow_fetch
+            git clone \
+              --depth 1 \
+              --branch  "$AIRFLOW_VERSION" \
+              "https://x-access-token:${GH_TOKEN}@github.com/$AIRFLOW_REPO.git" \
+              /tmp/airflow_fetch
+            mkdir -p "$DEPLOY_DIR/airflow"
+            cp -r /tmp/airflow_fetch/. "$DEPLOY_DIR/airflow/"
+            echo "$AIRFLOW_VERSION" >  "$DEPLOY_DIR/airflow/VERSION"
+            echo "  [OK] airflow/ fetched at $AIRFLOW_VERSION"
+          elif [[ "$SKIP_AIRFLOW" == "true" ]]; then
+            echo "  [SKIP] airflow - server already on version $AIRFLOW_VERSION"
+          fi
+
+          # method/business - always fetched, no skip 
+          if [[ "$NEED_METHOD" == "true" && -d "method" ]]; then 
+            mkdir -p "$DEPLOY_DIR/method/business"
+            cp -r method/. "$DEPLOY_DIR/method/business"
+            # Copy config template into method subdirs for render_config on server
+            for folder in Logs Archive Result; do 
+              if [ -d "method/$folder" ]; then 
+                mkdir -p "$DEPLOY_DIR/method/business/$folder/config"
+                cp "$TMPL" "$DEPLOY_DIR/method/business/$folder/config/config.template.json"
+              fi
+            done
+            echo "  [OK] method/business copied (always fresh)"
+          fi
+
+          # Validate 
+          FILE_COUNT=$(find "$DEPLOY_DIR" -type f | wc -l)
+          echo ""
+          echo "=== Package contents ($FILE_COUNT files) ==="
+          find "$DEPLOY_DIR" -type f | sort 
+
+          if [ "$FILE_COUNT" -eq 0 ]; then 
+            echo "::error::Deployment directory is empty - nothing to archive"
+            exit 1
+          fi
+
+          find "$DEPLOY_DIR" -type f | sort > deployment_manifest.txt
+
+          tar -czf "$ARCHIVE_NAME" -C . deployment/
+          echo ""
+          echo "=== Archive: $ARCHIVE_NAME ==="
+          tar -tzf "$ARCHIVE_NAME"
+
+          echo "archive_name=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+
+      # 9. Upload artifact 
+      - name: Upload deployment archive 
+        uses: actions/upload-artifact@v4
+        with: 
+          name: deployment-archive
+          path: ${{ steps.package.outputs.archive_name }}
+          retention-days: 1
+          if-no-files-found: error 
+      
+      - name: Upload deployment manifest 
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-manifest-${{ steps.resolve.outputs.module }}
+          path: deployment_manifest.txt
+          retention-days: 1
+          if-no-files-found: warn
+
+      # Fetch the config template from date-tools if not present locally
+      - name: Resolve config template
+        id: config_template
+        run: | 
+          TEMPLATE_PATH="${{ inputs.config_template_path }}"
+
+          if [ -f "$TEMPLATE_PATH" ]; then 
+            echo "Using local template: $TEMPLATE_PATH"
+            echo "template_path=$TEMPLATE_PATH" >> "$GITHUB_OUTPUT"
+          else
+            echo "Template not found at $TEMPLATE_PATH - using bundled fallback"
+            mkdir -p "$(dirname "$TEMPLATE_PATH")"
+            echo '{ "module": "{{ MODULE }}", "deployment_date": "{{ DEPLOYMENT_DATE}}" }'
+          fi
+
+      - name: Package module & method
+        id: package 
+        env:
+          CLOUD_DB_NAME: ${{ secrets.CLOUD_DB_NAME }}
+          CLOUD_DB_USER: ${{ secrets.CLOUD_DB_USER }}
+          CLOUD_DB_PASSWORD: ${{ secrets.CLOUD_DB_PASSWORD }}
+          CLOUD_DB_HOST: ${{ secrets.CLOUD_DB_HOST }}
+          CLOUD_DB_PORT: ${{ secrets.CLOUD_DB_PORT }}
+          BUCKET_NAME: ${{ secrets.BUCKET_NAME }}
+          TRAINING_TABLE: ${{ secrets.TRAINING_TABLE }}
+          CONFIG_CRYPTOCURRENCIES: ${{ secrets.CONFIG_CRYPTOCURRENCIES }}
+          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
+          API_SECRET_KEY: ${{ secrets.API_SECRET_KEY }}  
+          STABLECOIN: ${{ secrets.STABLECOIN }}      
+          CLOUD_ACCESS_KEY: ${{ secrets.CONFIG_CLOUD_ACCESS_KEY_ID }}
+          CLOUD_SECRET_KEY: ${{ secrets.CONFIG_CLOUD_SECRET_ACCESS_KEY }}  
+        run: |
+          set -e 
+
+          MODULE="${{ inputs.module }}"
+          SUBFOLDER="${{ inputs.custom_src_subfolder }}"
+          DEPLOY_DIR="deployment"
+          MODULE_DIR="$DEPLOY_DIR/${MODULE,,}"
+          ARCHIVE_NAME="${{ inputs.module }}_deployment.tar.gz"
+
+          echo "Building deployment for module: $MODULE"
+          echo "Custom subfolder: ${SUBFOLDER:-none}"
+          
+          # Clean previous runs 
+          rm -rf "$DEPLOY_DIR" "$ARCHIVE_NAME"
+          mkdir -p "$MODULE_DIR/config" "$MODULE_DIR/src" 
+
+          [ -d "$MODULE_DIR/tests" ] || mkdir -p "$MODULE_DIR/tests"
+          
+          echo "Writing config.json"
+          cat <<EOF > "$MODULE_DIR/config/config.json"
+          {
+            "module": "$MODULE",
+            "deployment_date": "$(date -u +%Y-%m-%dT%H%M%SZ)",
+            "CLOUD_DB_NAME": "$CLOUD_DB_NAME",
+            "CLOUD_DB_USER": "$CLOUD_DB_USER",
+            "CLOUD_DB_PASSWORD": "$CLOUD_DB_PASSWORD",
+            "CLOUD_DB_HOST": "$CLOUD_DB_HOST",
+            "CLOUD_DB_PORT": "$CLOUD_DB_PORT",
+            "bucket_name": "$BUCKET_NAME",
+            "training_table": "$TRAINING_TABLE",
+            "stablecoin": "$STABLECOIN",
+            "cryptocurrencies": $CONFIG_CRYPTOCURRENCIES,
+            "$CLOUD_ACCESS_KEY_NAME": "$CLOUD_ACCESS_KEY",
+            "$CLOUD_SECRET_KEY_NAME": "$CLOUD_SECRET_KEY",
+            "config": {
+              "API": {
+                "AK": "$API_ACCESS_KEY",
+                "SK": "$API_SECRET_KEY"
+              }
+            }
+          }
+          EOF
+
+          if [[ -z "$SUBFOLDER" || "$SUBFOLDER" == "<none>" ]]; then
+            SRC_DIR="$MODULE/src"
+          else
+            SRC_DIR="$MODULE/src/$SUBFOLDER"
+          fi
+
+          echo "Checking source dir: $SRC_DIR"
+          if [ -d "$SRC_DIR" ]; then 
+            echo "Source directory exists, Copying files..."
+            cp -r $SRC_DIR/* "$MODULE_DIR/src/" 2>/dev/null || echo "No src files found"
+          else
+            echo "Source directory $SRC_DIR does not exist"
+          fi
+
+          if [ -d "$MODULE/tests" ]; then
+            echo "Copying tests"
+            cp -r "$MODULE/tests" "$MODULE_DIR/"
+          fi
+
+          if [ -d "jars" ]; then 
+            echo "Compressing jars/ into jars.tar.gz"
+            tar -czf jars.tar.gz jars 
+            cp -r jars.tar.gz "$DEPLOY_DIR/"
+          else
+            echo "Error: root-level 'jars' folder is missing"
+            exit 1
+          fi
+
+          if [ -d "Airflow_Schedule" ]; then 
+            echo "Compressing Airflow_Schedule int airflow_schedule.tar.gz"
+            tar -czf airflow_schedule.tar.gz Airflow_Schedule
+            cp -r airflow_schedule.tar.gz "$DEPLOY_DIR/"
+          else
+            echo "Error: root-level 'Airflow_Schedule/' folder is missing."
+            exit 1
+          fi
+          
+          if [ -d "method" ]; then
+            echo "Copying method/"
+            cp -r method "$DEPLOY_DIR/"
+
+            echo "Injecting config.json into Logs/, Result/, and Archive/ folders.."
+            CONFIG_PATHS=("Logs" "Result" "Archive")
+
+            for folder in "${CONFIG_PATHS[@]}"; do
+              TARGET_DIR="$DEPLOY_DIR/method/$folder/config"
+              mkdir -p "$TARGET_DIR"
+
+              echo "Writing config.json to $TARGET_DIR"
+              cat <<EOF > "$TARGET_DIR/config.json"
+          {
+            "module": "$MODULE",
+            "deployment_date": "$(date -u +%Y-%m-%dT%H%M%SZ)",
+            "CLOUD_DB_NAME": "$CLOUD_DB_NAME",
+            "CLOUD_DB_USER": "$CLOUD_DB_USER",
+            "CLOUD_DB_PASSWORD": "$CLOUD_DB_PASSWORD",
+            "CLOUD_DB_HOST": "$CLOUD_DB_HOST",
+            "CLOUD_DB_PORT": "$CLOUD_DB_PORT",
+            "bucket_name": "$BUCKET_NAME",
+            "training_table": "$TRAINING_TABLE",
+            "stablecoin": "$STABLECOIN",
+            "cryptocurrencies": $CONFIG_CRYPTOCURRENCIES,
+            "$CLOUD_ACCESS_KEY_NAME": "$CLOUD_ACCESS_KEY",
+            "$CLOUD_SECRET_KEY_NAME": "$CLOUD_SECRET_KEY",
+            "config": {
+              "API": {
+                "AK": "$API_ACCESS_KEY",
+                "SK": "$API_SECRET_KEY"
+              }
+            }
+          }
+          EOF
+            done
+          else
+            echo "Error: root-level 'method/' folder is missing!"
+            exit 1
+          fi
+
+          echo "Deployment folder structure:"
+          find "$DEPLOY_DIR" -type f || echo "Deployment folder is empty"
+          if [ -z "$(find "$DEPLOY_DIR" -type f)" ]; then
+            echo "Nothing to archive. Exiting."
+            exit 1
+          fi
+
+          find "$DEPLOY_DIR" -type f | sort > deployment_manifest.txt 
+
+          echo "Creating archive: $ARCHIVE_NAME"
+          tar -czf "$ARCHIVE_NAME" -C . deployment/
+
+          echo "Archive content:"
+          tar -tzf "$ARCHIVE_NAME"
+          echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload deployment archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-archive
+          path: ${{ steps.package.outputs.archive_name }}
+          retention-days: 1
+
+      - name: Upload deployment manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-manifest-${{ inputs.module }}
+          path: deployment_manifest.txt
+          retention-days: 1

@@ -1,0 +1,327 @@
+name: Verify deployment on server
+
+on:
+  workflow_call:
+    inputs:
+      module:
+        required: false
+        type: string
+        default: ""
+      deployment_id: 
+        required: true
+        type: string 
+      need_jars: 
+        required: false
+        type: boolean
+        default: true
+      need_tools: 
+        required: false
+        type: boolean
+        default: true
+      need_airflow: 
+        required: false
+        type: boolean
+        default: true     
+      need_method: 
+        required: false
+        type: boolean
+        default: true
+      skip_jars: 
+        required: false
+        type: boolean
+        default: false
+      skip_tools: 
+        required: false
+        type: boolean
+        default: false
+      skip_airflow: 
+        required: false
+        type: boolean
+        default: false
+      jars_version: 
+        required: false
+        type: string
+        default: ""  
+      airflow_version: 
+        required: false
+        type: string
+        default: ""  
+      tools_version: 
+        required: false
+        type: string
+        default: ""  
+    secrets:
+      SERVER_USERNAME:
+        required: true
+      SERVER_HOST:
+        required: true
+      SERVER_SSH_KEY:
+        required: true 
+    outputs:
+      verify_status:
+        description: "success or failure"
+        value: ${{ jobs.verify.outputs.verify_status }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      verify_status: ${{ steps.verify.outputs.verify_status }}
+    
+    steps:
+      # 1. Resolve module name
+      - name: Resolve module name
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          MODULE="${{ inputs.module }}"
+          if [ -z "$MODULE" ]; then 
+            REPO="${{ github.repository }}"
+            MODULE="${REPO##*/}"
+            echo "Derived from repo name: $MODULE"
+          fi
+
+          MODULE=$(echo "$MODULE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          echo "Resolved module: $MODULE"
+          echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+
+      # 2. Setup SSH
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          install -m 600 /dev/stdin ~/.ssh/id_rsa <<< "${{ secrets.SERVER_SSH_KEY }}"
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh.known_hosts
+
+      # 3. Verify deployment on server
+      - name: Verify deployment 
+        id: verify
+        env:
+          SERVER_USER:     ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST:     ${{ secrets.SERVER_HOST }}
+          MODULE:          ${{ steps.resolve.outputs.module }}
+          DEPLOYMENT_ID:   ${{ inputs.deployment_id }}
+          NEED_JARS:       ${{ inputs.need_jars }}
+          NEED_TOOLS:      ${{ inputs.need_tools }}
+          NEED_AIRFLOW:    ${{ inputs.need_airflow }}
+          NEED_METHOD:     ${{ inputs.need_method }}
+          SKIP_JARS:       ${{ inputs.skip_jars }}
+          SKIP_TOOLS:      ${{ inputs.skip_tools }}
+          SKIP_AIRFLOW:    ${{ inputs.skip_airflow }}
+          JARS_VERSION:    ${{ inputs.jars_version }}
+          TOOLS_VERSION:   ${{ inputs.tools_version }}
+          AIRFLOW_VERSION: ${{ inputs.airflow_version }}
+        run: |
+          set -euo pipefail
+          
+          RESULT=$(ssh "$SERVER_USER@$SERVER_HOST" bash <<'REMOTE'
+            set -euo pipefail
+
+            MODULE="$MODULE"
+            DEPLOYMENT_ID="$DEPLOYMENT_ID"
+            DEPLOY_BASE=~/deployments
+            MODULE_DIR="$DEPLOY_BASE/$MODULE"
+            LOG_FILE="/tmp/deploy_${MODULE}_${DEPLOYMENT_ID}.log"
+
+            ERRORS=()
+            WARNINGS=()
+
+            echo "=== Verify: $MODULE ($DEPLOYMENT_ID) ==="
+
+            # 1. Deployment log - success marker 
+            echo "--- Checking deployment log ---"
+            if [ ! -f "$LOG_FILE" ]; then
+              ERRORS+=("Log file not found: $LOG_FILE")
+            elif grep -q "DEPLOYMENT COMPLETED SUCCESSFULLY" "$LOG_FILE"; then 
+              echo "  [OK] success marker found in log"
+            else
+              ERRORS+=("Success marker missing in from log - deployment may have failed mid-run")
+              echo "  Last 20 lines of log:"
+              tail -20 "$LOG_FILE" || true
+            fi
+
+            # 2. Module directory and src
+            echo "--- Checking module directory ---"
+            if [ ! -d "$MODULE_DIR" ]; then 
+              ERRORS+=("Module directory missing: $MODULE_DIR")
+            else
+              echo "  [OK] $MODULE_DIR exist"
+
+              # config.json must have been rendered (not just template)
+              if [ ! -f "$MODULE_DIR/config/config.json" ]; then 
+                ERRORS+=("config.json not found - SSM render may have failed")
+              else
+                echo "  [OK] config.json present"
+                # validate is a valid json 
+                python3 -c "
+          import json, sys
+          try:
+            json.load(open('$MODULE_DIR/config/config.json'))
+            print('  [OK] config.json is valid JSON')
+          except Exception as e:
+            print(f'  [FAIL] config.json is not valid JSON: {e}') 
+            sys.exit(1)
+                "
+              fi
+
+              # src must not be empty 
+              SRC_COUNT=$(find "$MODULE_DIR/src" -type f 2>/dev/null | wc -l)
+              if [ "$SRC_COUNT" -eq 0 ]; then 
+                ERRORS+=("src/ is empty in deployed module")
+              else
+                echo "  [OK] src - $SRC_COUNT files"
+              fi
+            fi
+
+            # 3. jars
+            echo "--- Checking jars ---"
+            if [[ "$NEED_JARS" == 'true' ]]; then 
+              if [ ! -d "$DEPLOY_BASE/jars" ]; then 
+                ERRORS+=("jars/ directory missing from deployments/")
+              else
+                SERVER_JARS_VERSION=$(cat "$DEPLOY_BASE/jars/VERSION" 2>/dev/null || echo "MISSING")
+                if [[ "$SERVER_JARS_VERSION" == "$JARS_VERSION" ]]; then 
+                  echo "  [OK] jars version $SERVER_JARS_VERSION"
+                else
+                  ERRORS+=("jars VERSION mismatch - expected $JARS_VERSION, got $SERVER_JARS_VERSION")
+                fi
+                JAR_COUNT=$(find "DEPLOY_BASE/jars" --name "*.jar" | wc -l)
+                echo "  [OK] $JAR_COUNT jar file(s) present"
+              fi
+            else 
+              echo "  [SKIP] jars not required"
+            fi
+
+            # 4. Tools/utils
+            if [[ "$NEED_TOOLS" == "true" ]]; then
+              if [ ! -d "$DEPLOY_BASE/utils" ]; then 
+                ERRORS+=("utils/ directory missing from deployments/")
+              else
+                SERVER_UTILS_VERSION=$(cat "$DEPLOY_BASE/utils/VERSION" 2>/dev/null || echo "MISSING")
+                if [[ "$SERVER_UTILS_VERSION" == "$TOOLS_VERSION" ]]; then 
+                  echo "  [OK] utils version $SERVER_UTILS_VERSION"
+                elif [[ "$SKIP_TOOLS" == "true" ]]; then
+                  # Was skipped intentionally - version on server may be older
+                  # but that was the decision made at build time
+                  WARNINGS+=("utils version $SERVER_UTILS_VERSION kept (skip_tools='true', required=$TOOLS_VERSION)")
+                else
+                  ERRORS+=("utils VERSION mismatch - expected $TOOLS_VERSION, got $SERVER_UTILS_VERSION")
+                fi
+              fi
+            else 
+              echo "  [SKIP] tools not required"
+            fi
+
+            # 5. Airflow 
+            if [[ "$NEED_AIRFLOW" == "true" ]]; then 
+              if [ ! -d "$DEPLOY_BASE/airflow" ]; then
+                ERRORS+=("airflow/ directory missing from deployments/")
+              else
+                SERVER_AIRFLOW_VERSION=$(cat "$DEPLOY_BASE/airflow/VERSION" 2>/dev/null || echo "MISSING")
+                if [[ "$SERVER_AIRFLOW_VERSION" == "$AIRFLOW_VERSION" ]]; then 
+                  echo "  [OK] airflow version $SERVER_AIRFLOW_VERSION"
+                elif [[ "$SKIP_AIRFLOW" == "true" ]]; then 
+                  WARNINGS+=("airflow version $SERVER_AIRFLOW_VERSION kept (skip_airflow=true, required=$AIRFLOW_VERSION)")
+                else
+                  ERRORS+=("airflow VERSION mismatch - expected $AIRFLOW_VERSION, got $SERVER_AIRFLOW_VERSION")
+                fi
+              fi
+            else 
+              echo "  [SKIP] airflow not required"
+            fi
+
+            # 6. method/business
+            echo "--- Checking method/business ---"
+            if [[ "$NEED_METHOD" == "true" ]]; then
+              if [ ! -d "$DEPLOY_BASE/method/business" ]; then 
+                ERRORS+=("method/business/ missing from deployments/")
+              else
+                echo "  [OK] method/business present"
+                # Check config files 
+                for folder in Logs Result Archive; do 
+                  CFG="$DEPLOY_BASE/method/business/$folder/config/config.json"
+                  if [ -f "$CFG" ]; then
+                    echo "  [OK] method/business/$folder/config/config.json"
+                  else
+                    WARNINGS+=("method/business/$folder/config/config.json not rendered")
+                  fi
+                done
+              fi
+            else
+              echo "  [SKIP] method not required"
+            fi
+
+            # 7. Disk space sanity check 
+            echo "--- Disk space ---"
+            DISK_USAGE=$(df -h "$DEPLOY_BASE" | tail -1 | awk '{print $5}' | tr -d '%')
+            if [ "$DISK_USAGE" -gt 90 ]; then
+              WARNINGS+=("Disk usage at ${DISK_USAGE}% on deployment partition")
+            else
+              echo "  [OK] Disk usage: ${DISK_USAGE}%"
+            fi
+
+            # 8. Report 
+            echo ""
+            for w in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do
+              echo "::warning::$w"
+            done
+
+            if [ ${#ERRORS[@]} -gt 0 ]; then
+              echo "=== Verify FAILED ==="
+              for e in "${ERRORS[@]}"; do
+                echo "::error::$e"
+              done
+              exit 1
+            fi
+
+            echo "=== Verify PASSED ==="
+          REMOTE
+          )
+
+          echo "$RESULT"
+
+          if echo "$RESULT" | grep -q "Verify FAILED"; then 
+            echo "verify_status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "verify_status=success" >> "$GITHUB_OUTPUT"
+      
+      # 4. Rollback in verify failure
+      - name: Transfer and execute rollback 
+        if: steps.verify.outputs.verify_status == 'failure'
+        env: 
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail 
+
+          echo "Verify failed - initiating rollback"
+
+          scp tools/rollback.sh "$SERVER_USER@$SERVER_HOST":~/
+
+          ssh "$SERVER_USER@$SERVER_HOST" bash <<'REMOTE'
+            set -euo pipefail
+            source ~/deploy_env.sh
+            chmod +x ~/rollback.sh
+            bash ~/rollback.sh
+            rm -f ~/rollback.sh
+          REMOTE
+
+          echo "::error::deployment verified as failed - rollback executed"
+          exit 1
+
+      # 5. Summary 
+      - name: Summary
+        if: always()
+        run: | 
+          STATUS="${{ steps.verify.outputs.verify_status || 'unknown' }}"
+          echo "### Verify summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Module | ${{ steps.resolve.outputs.module }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Deployment ID | ${{ inputs.deployment_id }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Result | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Jars version | ${{ inputs.jars_version || 'n/a' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tools version | ${{ inputs.tools_version || 'n/a' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Airflow version | ${{ inputs.airflow_version || 'n/a' }} |" >> "$GITHUB_STEP_SUMMARY"

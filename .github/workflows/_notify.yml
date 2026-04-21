@@ -1,0 +1,73 @@
+name: Notify deployment status
+
+on:
+    workflow_call:
+      inputs:
+        module: 
+          required: true
+          type: string
+        deployment_id:
+          required: true 
+          type: string 
+  
+jobs:
+  notify:
+    runs-on: ubuntu-24.04
+    if: always()
+
+    steps:
+      - name: Install dependencies 
+        run: | 
+          sudo apt-get update && sudo apt-get install -y openssh-client
+          pip install awscli 
+
+      - name: Fetch logs from server (on failure only)
+        if: failure()
+        env:
+          SERVER_USER: ${{ secrets.SERVER_USERNAME }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          MODULE: ${{ inputs.module }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+        run: | 
+          mkdir -p logs
+
+          echo "Fetching deploy log from server..."
+          ssh $SERVER_USER@$SERVER_HOST "cat /tmp/deploy_${MODULE}_${DEPLOYMENT_ID}.log 2>/dev/null || echo 'No deploy log found.'" > logs/deploy.log
+
+          echo "Fetching verify log from server..."
+          ssh $SERVER_USER@$SERVER_HOST "cat /tmp/deploy_${MODULE}_${DEPLOYMENT_ID}.log 2>/dev/null || echo 'No verify log found.'" > logs/verify.log
+
+      - name: Upload logs to S3 (on failure only)
+        if: failure()
+        env: 
+          AWS_ACCESS_KEY_ID: ${{ secrets.CONFIG_AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CONFIG_AWS_SECRET_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CONFIG_AWS_REGION }}
+          BUCKET_NAME: ${{ secrets.CONFIG_BUCKET_NAME }}
+          MODULE: ${{ inputs.module }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+        run: | 
+          echo "Uploading logs to S3..."
+          aws s3 cp logs/ "s3://$BUCKET_NAME/logs/failures/$MODULE/$DEPLOYMENT_ID/" --recursive
+          echo "Logs upload to: s3://$BUCKET_NAME/logs/failures/$MODULE/$DEPLOYMENT_ID/"
+
+      - name: Send notification 
+        env: 
+          MODULE: ${{ inputs.module }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          BUCKET_NAME: ${{secrets.CONFIG_BUCKET_NAME }}
+        run: |
+          if [ "${{job.status }}" == "success" ]; then
+            MESSAGE="*${MODULE}* deployed successfully.\nDeployment ID: $DEPLOYMENT_ID"
+            STATUS="success"
+          else
+            MESSAGE="*${MODULE}* deployment failed!\nDeployment ID: $DEPLOYMENT_ID\nLogs s3://$BUCKET/logs/failure/$MODULE/$DEPLOYMENT_ID/"
+            STATUS="failure"
+          fi
+
+          echo -e "$MESSAGE"
+
+          if [ "$STATUS" == "failure" ]; then
+            echo "::error::$MESSAGE"
+            exit 1
+          fi 
