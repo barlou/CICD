@@ -273,7 +273,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # Authenticate with GH_TOKEN explicitly 
-          git remote set-url orgin \
+          git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git "
 
           # Verify tag doesn't already exist 
