@@ -81,15 +81,30 @@ jobs:
           set -euo pipefail
 
           # Install gitleaks
-          GITLEAKS_VERSION="8.12.2"
+          GITLEAKS_VERSION="8.30.1"
           curl -sSL \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
-          chmod +x gitleaks 
+            -o /tmp/gitleaks.tar.gz
+          
+          # Extract everything to /tmp/gitleaks_extract/
+          mkdir -p /tmp/gitleaks_extract
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp/gitleaks_extract 
+
+          # Verify extraction worked
+          echo "Extracted contents:"
+          ls -la /tmp/gitleaks_extract/   
+          
+          # Copy binary to working directory
+          cp /tmp/gitleaks_extract/gitleaks ./gitleaks
+          chmod +x gitleaks
+
+          # Check gitleaks version 
+          ./gitleaks --version 
 
           echo "Scanning commits from ${{ steps.range.outputs.base }} to HEAD"
 
           # --log-opts restricts scan to delta commits only
+          set +e
           ./gitleaks detect \
             --source . \
             --log-opts "${{ steps.range.outputs.base }}..HEAD" \
@@ -402,7 +417,7 @@ jobs:
         env:
           GITLEAKS_STATUS:         ${{ needs.gitleaks.outputs.status }}
           SEMGREP_STATUS:          ${{ needs.semgrep.outputs.status }}
-          PIP_AUDIT_STATUS:        ${{ needs.pip-audit.outputs.status }}
+          PIP_AUDIT_STATUS:        ${{ needs.pip_audit.outputs.status }}
           GITLEAKS_ALLOW_FAILURE:  ${{ inputs.gitleaks_allow_failure || false }}
           SEMGREP_ALLOW_FAILURE:   ${{ inputs.semgrep_allow_failure || false }}
           PIP_AUDIT_ALLOW_FAILURE: ${{ inputs.pip_audit_allow_failure || false }}          
@@ -421,12 +436,12 @@ jobs:
             {
               "name": "Semgrep",
               "status": os.environ.get("SEMGREP_STATUS", "failure"),
-              "allow_failure": os.environ.get("SEMGREP_ALLOW_FAILURE", "false")
+              "allow_failure": os.environ.get("SEMGREP_ALLOW_FAILURE", "false").lower() == "false"
             },
             {
               "name": "pip-audit",
               "status": os.environ.get("PIP_AUDIT_STATUS", "failure"),
-              "allow_failure": os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false")
+              "allow_failure": os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false").lower() == "false"
             },
           ]
 
