@@ -529,7 +529,9 @@ jobs:
           git pull origin main 
 
           git merge origin/release --no-ff \
-            -m "chore(release): merge release -> main after security gate [skip ci]"
+            -m "chore(release): merge release -> main after security gate"
           
           git push origin main 
           echo "Merges release -> main - production deploy and release tag will now be trigger"
+          git checkout -m develop
+          git merge main
