@@ -272,6 +272,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Authenticate with GH_TOKEN explicitly 
+          git remote set-url orgin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
           # Verify tag doesn't already exist 
           if git rev-parse "$TAG" >/dev/null 2>&1; then 
             echo "::error::Tag $TAG already exists - aborting to avoid overwrite"

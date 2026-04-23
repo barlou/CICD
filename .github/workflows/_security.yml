@@ -533,3 +533,5 @@ jobs:
           
           git push origin main 
           echo "Merges release -> main - production deploy and release tag will now be trigger"
+          git checkout -m develop
+          git merge main
