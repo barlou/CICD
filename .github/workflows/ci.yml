@@ -1,6 +1,7 @@
 # barlou/CICD/.github/workflows/ci.yml
 name: CICD self pipeline
 
+# Github Action workflow
 on:
   push:
     branches:
