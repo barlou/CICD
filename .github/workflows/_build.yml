@@ -46,6 +46,8 @@ on:
         value: ${{ jobs.build.outputs.need_tools }}
       need_airflow:
         value: ${{ jobs.build.outputs.need_airflow }}
+      need_airflow_job:
+        value: ${{ jobs.build.outputs.need_airflow_jobs }}
       need_method:
         value: ${{ jobs.build.outputs.need_method }}
       jars_version:
@@ -65,19 +67,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      archive_name:    ${{ steps.package.outputs.archive_name }}
-      module_name:     ${{ steps.resolve.outputs.module }}
-      skip_tools:      ${{ steps.server_check.outputs.skip_tools }}
-      skip_airflow:    ${{ steps.server_check.outputs.skip_airflow }}
-      need_jars:       ${{ steps.cfg.outputs.need_jars }}
-      need_tools:      ${{ steps.cfg.outputs.need_tools }}
-      need_airflow:    ${{ steps.cfg.outputs.need_airflow }}
-      need_method:     ${{ steps.cfg.outputs.need_method }}
-      jars_version:    ${{ steps.cfg.outputs.jars_version }}
-      tools_version:   ${{ steps.cfg.outputs.tools_version }}
-      airflow_version: ${{ steps.cfg.outputs.airflow_version }}
-      airflow_id:      ${{ steps.cfg.outputs.airflow_id }}
-      ssm_prefix:      ${{ steps.cfg.outputs.ssm_prefix }}
+      archive_name:     ${{ steps.package.outputs.archive_name }}
+      module_name:      ${{ steps.resolve.outputs.module }}
+      skip_tools:       ${{ steps.server_check.outputs.skip_tools }}
+      skip_airflow:     ${{ steps.server_check.outputs.skip_airflow }}
+      need_jars:        ${{ steps.cfg.outputs.need_jars }}
+      need_tools:       ${{ steps.cfg.outputs.need_tools }}
+      need_airflow:     ${{ steps.cfg.outputs.need_airflow }}
+      need_airflow_job: ${{ steps.cfg.outputs.need_airflow_job }}
+      need_method:      ${{ steps.cfg.outputs.need_method }}
+      jars_version:     ${{ steps.cfg.outputs.jars_version }}
+      tools_version:    ${{ steps.cfg.outputs.tools_version }}
+      airflow_version:  ${{ steps.cfg.outputs.airflow_version }}
+      airflow_id:       ${{ steps.cfg.outputs.airflow_id }}
+      ssm_prefix:       ${{ steps.cfg.outputs.ssm_prefix }}
     
     steps:
       # 1. Checkout
@@ -123,15 +126,16 @@ jobs:
           with open("cicd.config.yml") as fetch-depth:
             cfg = yaml.safe_load(f)
 
-          components  = cfg.get("components", {})
-          update      = cfg.get("update", {})
-          tmpl        = cfg.get("config_template", {})
-          secrets_map = cfg.get("secrets_map", {})
+          components      = cfg.get("components", {})
+          update          = cfg.get("update", {})
+          tmpl            = cfg.get("config_template", {})
+          secrets_map     = cfg.get("secrets_map", {})
 
-          jars_cfg    = components.get("jars", {}) 
-          airflow_cfg = components.get("airflow", {})
-          tools_cfg   = components.get("tools", {})
-          method_cfg  = components.get("method", {})
+          jars_cfg        = components.get("jars", {}) 
+          airflow_cfg     = components.get("airflow", {})
+          airflow_job_cfg = components.get("airflow_job", {})
+          tools_cfg       = components.get("tools", {})
+          method_cfg      = components.get("method", {})
 
           def out(key, val):
             with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
@@ -144,12 +148,14 @@ jobs:
           out("force_jars",   str(update.get("force_jars",     False)).lower())
 
           # airflow
-          out("need_airflow",    str(airflow_cfg.get("enabled", True)).lower())
-          out("airflow_version", str(airflow_cfg.get("version", "")))
-          out("airflow_repo",    str(airflow_cfg.get("repo", "")))
-          out("airflow_id",      str(airflow_cfg.get("instance_id", "")))
-          out("force_airflow",   str(update.get("force_airflow", False)).lower())
+          out("need_airflow",     str(airflow_cfg.get("enabled", True)).lower())
+          out("need_airflow_job", str(airflow_job_cfg.get("enabled", False)).lower())
+          out("airflow_version",  str(airflow_cfg.get("version", "")))
+          out("airflow_repo",     str(airflow_cfg.get("repo", "")))
+          out("airflow_id",       str(airflow_cfg.get("instance_id", "")))
+          out("force_airflow",    str(update.get("force_airflow", False)).lower())
 
+          
           # tools/utils
           out("need_tools",    str(tools_cfg.get("enabled",  True)).lower())
           out("tools_version", str(tools_cfg.get("version",  "")))
@@ -230,6 +236,16 @@ jobs:
               && echo "  [OK] airflow declared - version ${{ steps.cfg.outputs.airflow_version }}"
           else
             echo "  [SKIP] airflow not required"
+          fi
+
+          if [[ "${{ steps.cfg.output.need_airflow_job }}" == "true" ]]; then 
+            if [ ! "airflow/airflow_job.yml" ]; then 
+              ERRORS+=("need_airflow_job=true but airflow/airflow_job.yml not found at repo root")
+            else
+              echo "  [OK] airflow/airflow_job.yml present"
+            fi
+          else
+            echo "  [SKIP] airflow_job not required"
           fi
 
           # tools
@@ -444,6 +460,7 @@ jobs:
         id: package
         env:
           GH_TOKEN: "${{ secrets.GH_TOKEN }}"
+          NEED_AIRFLOW_JOB: "${{ steps.cfg.outputs.need_airflow_job }}"
         run: | 
           set -euo pipefail
 
@@ -551,6 +568,29 @@ jobs:
               fi
             done
             echo "  [OK] method/business copied (always fresh)"
+          fi
+
+          # requirements.txt - always required, venv_manager installs it 
+          if [ -f "$MODULE/requirements.txt" ]; then
+            cp "$MODULE/requirements.txt" "$MODULE_DIR/requirements.txt"
+            echo "  [OK] requirements.txt copied"
+          else
+            echo "::error::requirements.txt missing at $MODULE/requirements.txt"
+            exit 1
+          fi
+
+          # airflow_job.yml - copied if need_airflow_job=true
+          if [[ "$NEED_AIRFLOW" == "true" ]]; then 
+            if [ -f "airflow/airflow_job.yml" ]; then 
+              mkdir -p "$MODULE_DIR/airflow"
+              cp "airflow/airflow_job.yml" "$MODULE_DIR/airflow/airflow_job.yml"
+              echo "  [OK] airflow_job.yml copied to $MODULE_DIR/airflow/"
+            else
+              echo "::error::need_airflow_job==true but airflow/airflow_job.yml not found"
+              exit 1
+            fi
+          else
+            echo "  [SKIP] airflow_job not required"
           fi
 
           # Validate 
