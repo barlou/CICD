@@ -60,6 +60,9 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
+        env: 
+          GIT_HTTP_LOW_SPEED_LIMIT: 1000
+          GIT_HTTP_LOW_SPEED_TIME: 60
       
       - name: Resolve scan range
         id: range
@@ -83,6 +86,9 @@ jobs:
           # Install gitleaks
           GITLEAKS_VERSION="8.30.1"
           curl -sSL \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-max-time 60 \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             -o /tmp/gitleaks.tar.gz
           
@@ -207,6 +213,7 @@ jobs:
             --config "p/ci" \
             --json \
             --output semgrep-report.json \
+            --timeout 60 \
             ${{ steps.changed.outputs.files }} \
             && SCAN_STATUS="success" \
             || SCAN_STATUS="failure"
