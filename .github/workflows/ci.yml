@@ -1,0 +1,48 @@
+# barlou/CICD/.github/workflows/ci.yml
+name: CICD self pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - release
+  workflow_dispatch:
+    inputs:
+      gitleaks_allow_failure:
+        required: false
+        type: boolean
+        default: false
+      semgrep_allow_failure:
+        required: false
+        type: boolean
+        default: false
+      pip_audit_allow_failure:
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+
+  security:
+    name: Security gate
+    if: github.ref == 'refs/heads/release'
+    uses: barlou/CICD/.github/workflows/_security.yml@main
+    with:
+      gitleaks_allow_failure:  ${{ inputs.gitleaks_allow_failure || false }}
+      semgrep_allow_failure:   ${{ inputs.semgrep_allow_failure  || false }}
+      pip_audit_allow_failure: ${{ inputs.pip_audit_allow_failure || false }}
+    secrets: inherit
+
+  release:
+    name: Release — tag and changelog
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    uses: barlou/CICD/.github/workflows/_release.yml@main
+    with:
+      module: cicd
+    secrets: inherit
