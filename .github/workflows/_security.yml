@@ -167,7 +167,7 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python for Semgrep
-        if: steps.changed.outputs.skip == "false"
+        if: steps.changed.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with: 
           python-version: "3.11"
@@ -178,7 +178,7 @@ jobs:
 
       - name: Run Semgrep on changed files
         id: scan
-        if: steps.changed.outputs.skip == "false"
+        if: steps.changed.outputs.skip == 'false'
         continue-on-error: true
         run: |
           set -euo pipefail
