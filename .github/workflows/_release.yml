@@ -1,9 +1,6 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
   workflow_call:
     inputs:
       module: 
@@ -224,7 +221,7 @@ jobs:
           for line in raw.strip().splitlines():
             if not line.strip():
               continue
-            parts   = line.rsplit("|||")
+            parts   = line.split("|||")
             subject = parts[0].strip() if len(parts) > 0 else ""
             sha     = parts[1].strip() if len(parts) > 1 else ""
             author  = parts[2].strip() if len(parts) > 2 else ""
