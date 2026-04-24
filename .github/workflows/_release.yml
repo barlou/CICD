@@ -91,9 +91,12 @@ jobs:
 
           # Collect commits on main since last tag 
           COMMITS=$(git log "${LATEST_TAG}..HEAD" \
-            --first-parent \
             --pretty=format:"%s" \
-            --no-merges 2>/dev/null || true)
+            --no-merges 2>/dev/null \
+            | grep -v "^Merge " \
+            | grep -v "^chore(release):" \
+            | grep -v "^chore:" \
+            || true)
           
           if [[ -z "$COMMITS" ]]; then
             echo "::error::No commits found since $LATEST_TAG - nothing to release"
