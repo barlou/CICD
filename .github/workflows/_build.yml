@@ -62,6 +62,12 @@ on:
         value: ${{ jobs.build.outputs.ssm_prefix }}
       secrets_map:
         value: ${{ jobs.build.outputs.secrets_map }}
+      path_src:
+        value: ${{ jobs.build.outputs.path_src }}
+      path_tests:  
+        value: ${{ jobs.build.outputs.path_tests }}
+      path_requirements:
+        value: ${{ jobs.build.outputs.path_requirements }}
 
 jobs:
   build:
@@ -123,7 +129,7 @@ jobs:
           python3 - <<'PYEOF'
           import yaml, json, os, sys
 
-          with open("cicd.config.yml") as fetch-depth:
+          with open("cicd.config.yml") as f:
             cfg = yaml.safe_load(f)
 
           components      = cfg.get("components", {})
@@ -140,6 +146,9 @@ jobs:
           def out(key, val):
             with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"{key}={val}\n")
+            
+          paths_cfg = cfg.get("paths", {})
+          module    = ""
           
           # jars 
           out("need_jars",    str(jars_cfg.get("enabled",      True)).lower())
@@ -170,6 +179,10 @@ jobs:
           out("secrets_map",    json.dumps(secrets_map))
           out("ssm_prefix",     cfg.get("ssm_prefix", ""))
 
+          out("path_src",          paths_cfg.get("src", ""))
+          out("path_requirements", paths_cfg.get("requirements", ""))
+          OUT("path_tests",        paths_cfg.get("tests", ""))
+
           print("cicd.config.yml parsed ok.")
           print(f"  jars     : enabled={jars_cfg.get('enabled', True)}, version={jars_cfg.get('version', 'unset')}, files={list(jars_cfg.get('files', {}).keys())}")
           print(f"  airflow  : enabled={airflow_cfg.get('enabled', True)}, version={airflow_cfg.get('version', 'unset')}")
@@ -191,8 +204,11 @@ jobs:
 
           echo "=== Preflight for module: $MODULE ==="
 
+          SRC_PATH = "${{ steps.cfg.output.path_src }}"
+          SRC_PATH = "${SRC_PATH:-$MODULE/src}"
+
           # src directory 
-          if [ ! -d "$MODULE/src" ]; then
+          if [ ! -d "$SRC_PATH" ]; then
             ERRORS+=("Missing src directory: $MODULE/src")
           else
             FILE_COUNT=$(find "$MODULE/src" -type f | wc -l)
@@ -203,11 +219,23 @@ jobs:
             fi
           fi
 
+          TEST_PATH="${{ steps.cfg.outputs.path_tests }}"
+          TEST_PATH="${$TEST_PATH:-$MODULE/tests/}"
+
           # Tests (optional)
-          if [ ! -d "$MODULE/tests" ]; then 
+          if [ ! -d "$TEST_PATH" ]; then 
             WARNINGS+=("No tests/ found at $MODULE/tests - skipping tests copy")
           else 
             echo "  [OK] tests/"
+          fi
+
+          # requirements
+          REQ_PATH="${{ steps.cfg.outputs.path_requirements }}"
+          REQ_PATH="${REQ_PATH:-$MODULE/requirements.txt}"
+          if [ ! -f "$REQ_PATH" ]; then
+            ERRORS+=("Missing requirements.txt at $REQ_PATH")
+          else
+            echo "  [OK] requirements.txt"
           fi
 
           # jars 
@@ -238,8 +266,8 @@ jobs:
             echo "  [SKIP] airflow not required"
           fi
 
-          if [[ "${{ steps.cfg.output.need_airflow_job }}" == "true" ]]; then 
-            if [ ! "airflow/airflow_job.yml" ]; then 
+          if [[ "${{ steps.cfg.outputs.need_airflow_job }}" == "true" ]]; then 
+            if [ ! -f "airflow/airflow_job.yml" ]; then 
               ERRORS+=("need_airflow_job=true but airflow/airflow_job.yml not found at repo root")
             else
               echo "  [OK] airflow/airflow_job.yml present"
@@ -491,8 +519,11 @@ jobs:
           echo "  [ŒK] config template copied."
 
           # src
-          find "$MODULE/src" -type f | while IFS= read -r f; do 
-            rel="${f#$MODULE/src/}"
+          SRC_PATH="${{ steps.cfg.outputs.path_src }}"
+          SRC_PATH="${SRC_PATH:-$MODULE/src}"
+
+          find "$SRC_PATH" -type f | while IFS= read -r f; do 
+            rel="${f#$SRC_PATH}"
             dest="$MODULE_DIR/src/$rel"
             mkdir -p "$(dirname "$dest")"
             cp "$f" "$dest"
@@ -500,8 +531,11 @@ jobs:
           echo "  [OK] are copied"
 
           # tests
-          if [ -d "$MODULE/tests" ]; then 
-            cp -r "$MODULE/tests/." "$MODULE_DIR/tests/"
+          TESTS_PATH="${{ steps.cfg.outputs.path_tests }}"
+          TESTS_PATH="${TESTS_PATH:-$MODULE/tests}"
+
+          if [ -d "$TESTS_PATH" ]; then 
+            cp -r "$TESTS_PATH/." "$MODULE_DIR/tests/"
             echo "  [OK] tests copied"
           fi
 
@@ -571,16 +605,19 @@ jobs:
           fi
 
           # requirements.txt - always required, venv_manager installs it 
-          if [ -f "$MODULE/requirements.txt" ]; then
-            cp "$MODULE/requirements.txt" "$MODULE_DIR/requirements.txt"
+          REQ_PATH="${{ steps.cfg.outputs.path_requirements }}"
+          REQ_PATH="${REQ_PATH:-$MODULE/requirements.txt}"
+          
+          if [ -f "$REQ_PATH" ]; then
+            cp "$REQ_PATH" "$MODULE_DIR/requirements.txt"
             echo "  [OK] requirements.txt copied"
           else
-            echo "::error::requirements.txt missing at $MODULE/requirements.txt"
+            echo "::error::requirements.txt missing at $REQ_PATH"
             exit 1
           fi
 
           # airflow_job.yml - copied if need_airflow_job=true
-          if [[ "$NEED_AIRFLOW" == "true" ]]; then 
+          if [[ "$NEED_AIRFLOW_JOB" == "true" ]]; then 
             if [ -f "airflow/airflow_job.yml" ]; then 
               mkdir -p "$MODULE_DIR/airflow"
               cp "airflow/airflow_job.yml" "$MODULE_DIR/airflow/airflow_job.yml"
