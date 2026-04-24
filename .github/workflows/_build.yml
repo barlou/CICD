@@ -221,8 +221,8 @@ jobs:
 
           echo "=== Preflight for module: $MODULE ==="
 
-          SRC_PATH = "${{ steps.cfg.output.path_src }}"
-          SRC_PATH = "${SRC_PATH:-$MODULE/src}"
+          SRC_PATH="${{ steps.cfg.output.path_src }}"
+          SRC_PATH="${SRC_PATH:-$MODULE/src}"
 
           # src directory 
           if [ ! -d "$SRC_PATH" ]; then
