@@ -4,8 +4,9 @@ on:
   workflow_call:
     inputs:
       module: 
-        required: true
+        required: false
         type: string
+        default: ""
       custom_src_subfolder: 
         required: false 
         type: string
@@ -22,6 +23,18 @@ on:
         required: false
         type: string
         default: "config/config.template.json"
+      force_jars:
+        required: false
+        type: boolean
+        default: false
+      force_airflow:
+        required: false
+        type: boolean
+        default: false
+      force_tools:
+        required: false
+        type: boolean
+        default: false
     secrets:
       SERVER_HOST:
         required: true
@@ -62,25 +75,35 @@ on:
         value: ${{ jobs.build.outputs.ssm_prefix }}
       secrets_map:
         value: ${{ jobs.build.outputs.secrets_map }}
+      path_src:
+        value: ${{ jobs.build.outputs.path_src }}
+      path_tests:  
+        value: ${{ jobs.build.outputs.path_tests }}
+      path_requirements:
+        value: ${{ jobs.build.outputs.path_requirements }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      archive_name:     ${{ steps.package.outputs.archive_name }}
-      module_name:      ${{ steps.resolve.outputs.module }}
-      skip_tools:       ${{ steps.server_check.outputs.skip_tools }}
-      skip_airflow:     ${{ steps.server_check.outputs.skip_airflow }}
-      need_jars:        ${{ steps.cfg.outputs.need_jars }}
-      need_tools:       ${{ steps.cfg.outputs.need_tools }}
-      need_airflow:     ${{ steps.cfg.outputs.need_airflow }}
-      need_airflow_job: ${{ steps.cfg.outputs.need_airflow_job }}
-      need_method:      ${{ steps.cfg.outputs.need_method }}
-      jars_version:     ${{ steps.cfg.outputs.jars_version }}
-      tools_version:    ${{ steps.cfg.outputs.tools_version }}
-      airflow_version:  ${{ steps.cfg.outputs.airflow_version }}
-      airflow_id:       ${{ steps.cfg.outputs.airflow_id }}
-      ssm_prefix:       ${{ steps.cfg.outputs.ssm_prefix }}
+      archive_name:      ${{ steps.package.outputs.archive_name }}
+      module_name:       ${{ steps.resolve.outputs.module }}
+      skip_tools:        ${{ steps.server_check.outputs.skip_tools }}
+      skip_airflow:      ${{ steps.server_check.outputs.skip_airflow }}
+      need_jars:         ${{ steps.cfg.outputs.need_jars }}
+      need_tools:        ${{ steps.cfg.outputs.need_tools }}
+      need_airflow:      ${{ steps.cfg.outputs.need_airflow }}
+      need_airflow_job:  ${{ steps.cfg.outputs.need_airflow_job }}
+      need_method:       ${{ steps.cfg.outputs.need_method }}
+      jars_version:      ${{ steps.cfg.outputs.jars_version }}
+      tools_version:     ${{ steps.cfg.outputs.tools_version }}
+      airflow_version:   ${{ steps.cfg.outputs.airflow_version }}
+      airflow_id:        ${{ steps.cfg.outputs.airflow_id }}
+      ssm_prefix:        ${{ steps.cfg.outputs.ssm_prefix }}
+      secret_map:        ${{ steps.cfg.outputs.secret_map }}
+      path_src:          ${{ steps.cfg.outputs.path_src }}
+      path_tests:        ${{ steps.cfg.outputs.path_tests }}
+      path_requirements: ${{ steps.cfg.outputs.path_requirements }}
     
     steps:
       # 1. Checkout
@@ -123,7 +146,7 @@ jobs:
           python3 - <<'PYEOF'
           import yaml, json, os, sys
 
-          with open("cicd.config.yml") as fetch-depth:
+          with open("cicd.config.yml") as f:
             cfg = yaml.safe_load(f)
 
           components      = cfg.get("components", {})
@@ -140,6 +163,9 @@ jobs:
           def out(key, val):
             with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"{key}={val}\n")
+            
+          paths_cfg = cfg.get("paths", {})
+          module    = ""
           
           # jars 
           out("need_jars",    str(jars_cfg.get("enabled",      True)).lower())
@@ -170,6 +196,10 @@ jobs:
           out("secrets_map",    json.dumps(secrets_map))
           out("ssm_prefix",     cfg.get("ssm_prefix", ""))
 
+          out("path_src",          paths_cfg.get("src", ""))
+          out("path_requirements", paths_cfg.get("requirements", ""))
+          out("path_tests",        paths_cfg.get("tests", ""))
+
           print("cicd.config.yml parsed ok.")
           print(f"  jars     : enabled={jars_cfg.get('enabled', True)}, version={jars_cfg.get('version', 'unset')}, files={list(jars_cfg.get('files', {}).keys())}")
           print(f"  airflow  : enabled={airflow_cfg.get('enabled', True)}, version={airflow_cfg.get('version', 'unset')}")
@@ -191,8 +221,11 @@ jobs:
 
           echo "=== Preflight for module: $MODULE ==="
 
+          SRC_PATH = "${{ steps.cfg.output.path_src }}"
+          SRC_PATH = "${SRC_PATH:-$MODULE/src}"
+
           # src directory 
-          if [ ! -d "$MODULE/src" ]; then
+          if [ ! -d "$SRC_PATH" ]; then
             ERRORS+=("Missing src directory: $MODULE/src")
           else
             FILE_COUNT=$(find "$MODULE/src" -type f | wc -l)
@@ -203,11 +236,23 @@ jobs:
             fi
           fi
 
+          TEST_PATH="${{ steps.cfg.outputs.path_tests }}"
+          TEST_PATH="${$TEST_PATH:-$MODULE/tests/}"
+
           # Tests (optional)
-          if [ ! -d "$MODULE/tests" ]; then 
+          if [ ! -d "$TEST_PATH" ]; then 
             WARNINGS+=("No tests/ found at $MODULE/tests - skipping tests copy")
           else 
             echo "  [OK] tests/"
+          fi
+
+          # requirements
+          REQ_PATH="${{ steps.cfg.outputs.path_requirements }}"
+          REQ_PATH="${REQ_PATH:-$MODULE/requirements.txt}"
+          if [ ! -f "$REQ_PATH" ]; then
+            ERRORS+=("Missing requirements.txt at $REQ_PATH")
+          else
+            echo "  [OK] requirements.txt"
           fi
 
           # jars 
@@ -238,8 +283,8 @@ jobs:
             echo "  [SKIP] airflow not required"
           fi
 
-          if [[ "${{ steps.cfg.output.need_airflow_job }}" == "true" ]]; then 
-            if [ ! "airflow/airflow_job.yml" ]; then 
+          if [[ "${{ steps.cfg.outputs.need_airflow_job }}" == "true" ]]; then 
+            if [ ! -f "airflow/airflow_job.yml" ]; then 
               ERRORS+=("need_airflow_job=true but airflow/airflow_job.yml not found at repo root")
             else
               echo "  [OK] airflow/airflow_job.yml present"
@@ -326,13 +371,13 @@ jobs:
           NEED_JARS:   ${{ steps.cfg.outputs.need_jars }}
           JARS_VERSION:    ${{ steps.cfg.outputs.jars_version }}
           JARS_FILES_JSON: ${{ steps.cfg.outputs.jars_files }}
-          FORCE_JARS:      ${{ steps.cfg.outputs.force_jars }}
+          FORCE_JARS:      ${{ inputs.force_jars || steps.cfg.outputs.force_jars }}
           NEED_TOOLS:      ${{ steps.cfg.outputs.need_tools }}
           TOOLS_VERSION:   ${{ steps.cfg.outputs.tools_version }}
-          FORCE_TOOLS:     ${{ steps.cfg.outputs.force_tools }}
+          FORCE_TOOLS:     ${{ inputs.force_tools || steps.cfg.outputs.force_tools }}
           NEED_AIRFLOW:    ${{ steps.cfg.outputs.need_airflow }}
           AIRFLOW_VERSION: ${{ steps.cfg.outputs.airflow_version }}
-          FORCE_AIRFLOW:   ${{ steps.cfg.outputs.force_airflow }}
+          FORCE_AIRFLOW:   ${{ inputs.force_airflow || steps.cfg.outputs.force_airflow }}
         run: |
           SERVER_STATE=$(ssh "$SERVER_USER@$SERVER_HOST" bash <<'REMOTE'
             set -euo pipefail
@@ -491,8 +536,11 @@ jobs:
           echo "  [ŒK] config template copied."
 
           # src
-          find "$MODULE/src" -type f | while IFS= read -r f; do 
-            rel="${f#$MODULE/src/}"
+          SRC_PATH="${{ steps.cfg.outputs.path_src }}"
+          SRC_PATH="${SRC_PATH:-$MODULE/src}"
+
+          find "$SRC_PATH" -type f | while IFS= read -r f; do 
+            rel="${f#$SRC_PATH/}"
             dest="$MODULE_DIR/src/$rel"
             mkdir -p "$(dirname "$dest")"
             cp "$f" "$dest"
@@ -500,8 +548,11 @@ jobs:
           echo "  [OK] are copied"
 
           # tests
-          if [ -d "$MODULE/tests" ]; then 
-            cp -r "$MODULE/tests/." "$MODULE_DIR/tests/"
+          TESTS_PATH="${{ steps.cfg.outputs.path_tests }}"
+          TESTS_PATH="${TESTS_PATH:-$MODULE/tests}"
+
+          if [ -d "$TESTS_PATH" ]; then 
+            cp -r "$TESTS_PATH/." "$MODULE_DIR/tests/"
             echo "  [OK] tests copied"
           fi
 
@@ -571,16 +622,19 @@ jobs:
           fi
 
           # requirements.txt - always required, venv_manager installs it 
-          if [ -f "$MODULE/requirements.txt" ]; then
-            cp "$MODULE/requirements.txt" "$MODULE_DIR/requirements.txt"
+          REQ_PATH="${{ steps.cfg.outputs.path_requirements }}"
+          REQ_PATH="${REQ_PATH:-$MODULE/requirements.txt}"
+          
+          if [ -f "$REQ_PATH" ]; then
+            cp "$REQ_PATH" "$MODULE_DIR/requirements.txt"
             echo "  [OK] requirements.txt copied"
           else
-            echo "::error::requirements.txt missing at $MODULE/requirements.txt"
+            echo "::error::requirements.txt missing at $REQ_PATH"
             exit 1
           fi
 
           # airflow_job.yml - copied if need_airflow_job=true
-          if [[ "$NEED_AIRFLOW" == "true" ]]; then 
+          if [[ "$NEED_AIRFLOW_JOB" == "true" ]]; then 
             if [ -f "airflow/airflow_job.yml" ]; then 
               mkdir -p "$MODULE_DIR/airflow"
               cp "airflow/airflow_job.yml" "$MODULE_DIR/airflow/airflow_job.yml"
@@ -629,174 +683,6 @@ jobs:
           path: deployment_manifest.txt
           retention-days: 1
           if-no-files-found: warn
-
-      # Fetch the config template from date-tools if not present locally
-      - name: Resolve config template
-        id: config_template
-        run: | 
-          TEMPLATE_PATH="${{ inputs.config_template_path }}"
-
-          if [ -f "$TEMPLATE_PATH" ]; then 
-            echo "Using local template: $TEMPLATE_PATH"
-            echo "template_path=$TEMPLATE_PATH" >> "$GITHUB_OUTPUT"
-          else
-            echo "Template not found at $TEMPLATE_PATH - using bundled fallback"
-            mkdir -p "$(dirname "$TEMPLATE_PATH")"
-            echo '{ "module": "{{ MODULE }}", "deployment_date": "{{ DEPLOYMENT_DATE}}" }'
-          fi
-
-      - name: Package module & method
-        id: package 
-        env:
-          CLOUD_DB_NAME: ${{ secrets.CLOUD_DB_NAME }}
-          CLOUD_DB_USER: ${{ secrets.CLOUD_DB_USER }}
-          CLOUD_DB_PASSWORD: ${{ secrets.CLOUD_DB_PASSWORD }}
-          CLOUD_DB_HOST: ${{ secrets.CLOUD_DB_HOST }}
-          CLOUD_DB_PORT: ${{ secrets.CLOUD_DB_PORT }}
-          BUCKET_NAME: ${{ secrets.BUCKET_NAME }}
-          TRAINING_TABLE: ${{ secrets.TRAINING_TABLE }}
-          CONFIG_CRYPTOCURRENCIES: ${{ secrets.CONFIG_CRYPTOCURRENCIES }}
-          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
-          API_SECRET_KEY: ${{ secrets.API_SECRET_KEY }}  
-          STABLECOIN: ${{ secrets.STABLECOIN }}      
-          CLOUD_ACCESS_KEY: ${{ secrets.CONFIG_CLOUD_ACCESS_KEY_ID }}
-          CLOUD_SECRET_KEY: ${{ secrets.CONFIG_CLOUD_SECRET_ACCESS_KEY }}  
-        run: |
-          set -e 
-
-          MODULE="${{ inputs.module }}"
-          SUBFOLDER="${{ inputs.custom_src_subfolder }}"
-          DEPLOY_DIR="deployment"
-          MODULE_DIR="$DEPLOY_DIR/${MODULE,,}"
-          ARCHIVE_NAME="${{ inputs.module }}_deployment.tar.gz"
-
-          echo "Building deployment for module: $MODULE"
-          echo "Custom subfolder: ${SUBFOLDER:-none}"
-          
-          # Clean previous runs 
-          rm -rf "$DEPLOY_DIR" "$ARCHIVE_NAME"
-          mkdir -p "$MODULE_DIR/config" "$MODULE_DIR/src" 
-
-          [ -d "$MODULE_DIR/tests" ] || mkdir -p "$MODULE_DIR/tests"
-          
-          echo "Writing config.json"
-          cat <<EOF > "$MODULE_DIR/config/config.json"
-          {
-            "module": "$MODULE",
-            "deployment_date": "$(date -u +%Y-%m-%dT%H%M%SZ)",
-            "CLOUD_DB_NAME": "$CLOUD_DB_NAME",
-            "CLOUD_DB_USER": "$CLOUD_DB_USER",
-            "CLOUD_DB_PASSWORD": "$CLOUD_DB_PASSWORD",
-            "CLOUD_DB_HOST": "$CLOUD_DB_HOST",
-            "CLOUD_DB_PORT": "$CLOUD_DB_PORT",
-            "bucket_name": "$BUCKET_NAME",
-            "training_table": "$TRAINING_TABLE",
-            "stablecoin": "$STABLECOIN",
-            "cryptocurrencies": $CONFIG_CRYPTOCURRENCIES,
-            "$CLOUD_ACCESS_KEY_NAME": "$CLOUD_ACCESS_KEY",
-            "$CLOUD_SECRET_KEY_NAME": "$CLOUD_SECRET_KEY",
-            "config": {
-              "API": {
-                "AK": "$API_ACCESS_KEY",
-                "SK": "$API_SECRET_KEY"
-              }
-            }
-          }
-          EOF
-
-          if [[ -z "$SUBFOLDER" || "$SUBFOLDER" == "<none>" ]]; then
-            SRC_DIR="$MODULE/src"
-          else
-            SRC_DIR="$MODULE/src/$SUBFOLDER"
-          fi
-
-          echo "Checking source dir: $SRC_DIR"
-          if [ -d "$SRC_DIR" ]; then 
-            echo "Source directory exists, Copying files..."
-            cp -r $SRC_DIR/* "$MODULE_DIR/src/" 2>/dev/null || echo "No src files found"
-          else
-            echo "Source directory $SRC_DIR does not exist"
-          fi
-
-          if [ -d "$MODULE/tests" ]; then
-            echo "Copying tests"
-            cp -r "$MODULE/tests" "$MODULE_DIR/"
-          fi
-
-          if [ -d "jars" ]; then 
-            echo "Compressing jars/ into jars.tar.gz"
-            tar -czf jars.tar.gz jars 
-            cp -r jars.tar.gz "$DEPLOY_DIR/"
-          else
-            echo "Error: root-level 'jars' folder is missing"
-            exit 1
-          fi
-
-          if [ -d "Airflow_Schedule" ]; then 
-            echo "Compressing Airflow_Schedule int airflow_schedule.tar.gz"
-            tar -czf airflow_schedule.tar.gz Airflow_Schedule
-            cp -r airflow_schedule.tar.gz "$DEPLOY_DIR/"
-          else
-            echo "Error: root-level 'Airflow_Schedule/' folder is missing."
-            exit 1
-          fi
-          
-          if [ -d "method" ]; then
-            echo "Copying method/"
-            cp -r method "$DEPLOY_DIR/"
-
-            echo "Injecting config.json into Logs/, Result/, and Archive/ folders.."
-            CONFIG_PATHS=("Logs" "Result" "Archive")
-
-            for folder in "${CONFIG_PATHS[@]}"; do
-              TARGET_DIR="$DEPLOY_DIR/method/$folder/config"
-              mkdir -p "$TARGET_DIR"
-
-              echo "Writing config.json to $TARGET_DIR"
-              cat <<EOF > "$TARGET_DIR/config.json"
-          {
-            "module": "$MODULE",
-            "deployment_date": "$(date -u +%Y-%m-%dT%H%M%SZ)",
-            "CLOUD_DB_NAME": "$CLOUD_DB_NAME",
-            "CLOUD_DB_USER": "$CLOUD_DB_USER",
-            "CLOUD_DB_PASSWORD": "$CLOUD_DB_PASSWORD",
-            "CLOUD_DB_HOST": "$CLOUD_DB_HOST",
-            "CLOUD_DB_PORT": "$CLOUD_DB_PORT",
-            "bucket_name": "$BUCKET_NAME",
-            "training_table": "$TRAINING_TABLE",
-            "stablecoin": "$STABLECOIN",
-            "cryptocurrencies": $CONFIG_CRYPTOCURRENCIES,
-            "$CLOUD_ACCESS_KEY_NAME": "$CLOUD_ACCESS_KEY",
-            "$CLOUD_SECRET_KEY_NAME": "$CLOUD_SECRET_KEY",
-            "config": {
-              "API": {
-                "AK": "$API_ACCESS_KEY",
-                "SK": "$API_SECRET_KEY"
-              }
-            }
-          }
-          EOF
-            done
-          else
-            echo "Error: root-level 'method/' folder is missing!"
-            exit 1
-          fi
-
-          echo "Deployment folder structure:"
-          find "$DEPLOY_DIR" -type f || echo "Deployment folder is empty"
-          if [ -z "$(find "$DEPLOY_DIR" -type f)" ]; then
-            echo "Nothing to archive. Exiting."
-            exit 1
-          fi
-
-          find "$DEPLOY_DIR" -type f | sort > deployment_manifest.txt 
-
-          echo "Creating archive: $ARCHIVE_NAME"
-          tar -czf "$ARCHIVE_NAME" -C . deployment/
-
-          echo "Archive content:"
-          tar -tzf "$ARCHIVE_NAME"
-          echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
 
       - name: Upload deployment archive
         uses: actions/upload-artifact@v4
