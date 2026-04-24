@@ -198,7 +198,7 @@ jobs:
 
           out("path_src",          paths_cfg.get("src", ""))
           out("path_requirements", paths_cfg.get("requirements", ""))
-          OUT("path_tests",        paths_cfg.get("tests", ""))
+          out("path_tests",        paths_cfg.get("tests", ""))
 
           print("cicd.config.yml parsed ok.")
           print(f"  jars     : enabled={jars_cfg.get('enabled', True)}, version={jars_cfg.get('version', 'unset')}, files={list(jars_cfg.get('files', {}).keys())}")
