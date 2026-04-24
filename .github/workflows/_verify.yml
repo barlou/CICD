@@ -85,6 +85,13 @@ jobs:
           MODULE=$(echo "$MODULE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
           echo "Resolved module: $MODULE"
           echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+      
+      - name: Fetch rollback script
+        run: |
+          mkdir -p tools/
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/barlou/CICD/contents/tools/rollback.sh" -o tools/rollback.sh
+          chmod +x tools/rollback.sh
+          echo "  [OK] rollback.sh fetched"
 
       # 2. Setup SSH
       - name: Setup SSH
