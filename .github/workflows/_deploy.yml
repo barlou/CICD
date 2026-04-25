@@ -170,7 +170,7 @@ jobs:
           export SKIP_TOOLS="${{ inputs.skip_tools }}"
           export SKIP_AIRFLOW="${{ inputs.skip_airflow }}"
           export JARS_VERSION="${{ inputs.jars_version }}"
-          export TOOLS_VERSIONS="${{ inputs.tools_version }}"
+          export TOOLS_VERSION="${{ inputs.tools_version }}"
           export AIRFLOW_VERSION="${{ inputs.airflow_version }}"
           export AIRFLOW_ID="${{ inputs.airflow_id }}"
           export SECRET_MAP_JSON="${{ inputs.secret_map }}"
