@@ -90,6 +90,13 @@ jobs:
         with: 
           fetch-depth: 1
       
+      - name: Fetch deploy script
+        run: |
+          mkdir -p tools
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/barlou/CICD/contents/tools/deploy.sh" -o tools/deploy.sh
+          chmod +x tools/deploy.sh
+          echo "  [OK] deploy.sh fetched"
+      
       # 2. Resolve module name - same logic as _build.yml
       - name: Resolve module name 
         id: resolve
@@ -162,8 +169,8 @@ jobs:
           export SKIP_JARS="${{ inputs.skip_jars }}"
           export SKIP_TOOLS="${{ inputs.skip_tools }}"
           export SKIP_AIRFLOW="${{ inputs.skip_airflow }}"
-          export JARS_VERSIONS="${{ inputs.jars_version }}"
-          export TOOLS_VERSIONS="${{ inputs.tools_version }}"
+          export JARS_VERSION="${{ inputs.jars_version }}"
+          export TOOLS_VERSION="${{ inputs.tools_version }}"
           export AIRFLOW_VERSION="${{ inputs.airflow_version }}"
           export AIRFLOW_ID="${{ inputs.airflow_id }}"
           export SECRET_MAP_JSON="${{ inputs.secret_map }}"
