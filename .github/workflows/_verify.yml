@@ -85,13 +85,20 @@ jobs:
           MODULE=$(echo "$MODULE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
           echo "Resolved module: $MODULE"
           echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+      
+      - name: Fetch rollback script
+        run: |
+          mkdir -p tools/
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/barlou/CICD/contents/tools/rollback.sh" -o tools/rollback.sh
+          chmod +x tools/rollback.sh
+          echo "  [OK] rollback.sh fetched"
 
       # 2. Setup SSH
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           install -m 600 /dev/stdin ~/.ssh/id_rsa <<< "${{ secrets.SERVER_SSH_KEY }}"
-          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh.known_hosts
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
 
       # 3. Verify deployment on server
       - name: Verify deployment 
@@ -114,136 +121,133 @@ jobs:
         run: |
           set -euo pipefail
           
-          RESULT=$(ssh "$SERVER_USER@$SERVER_HOST" bash <<'REMOTE'
+          RESULT=$(ssh "$SERVER_USER@$SERVER_HOST" bash << REMOTE
             set -euo pipefail
 
             MODULE="$MODULE"
             DEPLOYMENT_ID="$DEPLOYMENT_ID"
+            NEED_JARS="$NEED_JARS"
+            NEED_TOOLS="$NEED_TOOLS"
+            NEED_AIRFLOW="$NEED_AIRFLOW"
+            NEED_METHOD="$NEED_METHOD"
+            SKIP_TOOLS="$SKIP_TOOLS"
+            SKIP_AIRFLOW="$SKIP_AIRFLOW"
+            SKIP_JARS="$SKIP_JARS"
+            JARS_VERSION="$JARS_VERSION"
+            TOOLS_VERSION="$TOOLS_VERSION"
+            AIRFLOW_VERSION="$AIRFLOW_VERSION"
+
             DEPLOY_BASE=~/deployments
-            MODULE_DIR="$DEPLOY_BASE/$MODULE"
-            LOG_FILE="/tmp/deploy_${MODULE}_${DEPLOYMENT_ID}.log"
+            MODULE_DIR="\$DEPLOY_BASE/\$MODULE"
+            LOG_FILE="/tmp/deploy_\${MODULE}_\${DEPLOYMENT_ID}.log"
 
             ERRORS=()
             WARNINGS=()
 
-            echo "=== Verify: $MODULE ($DEPLOYMENT_ID) ==="
+            echo "=== Verify: \$MODULE (\$DEPLOYMENT_ID) ==="
 
-            # 1. Deployment log - success marker 
+            # 1. Deployment log
             echo "--- Checking deployment log ---"
-            if [ ! -f "$LOG_FILE" ]; then
-              ERRORS+=("Log file not found: $LOG_FILE")
-            elif grep -q "DEPLOYMENT COMPLETED SUCCESSFULLY" "$LOG_FILE"; then 
+            if [ ! -f "\$LOG_FILE" ]; then
+              ERRORS+=("Log file not found: \$LOG_FILE")
+            elif grep -q "DEPLOYMENT COMPLETED SUCCESSFULLY" "\$LOG_FILE"; then
               echo "  [OK] success marker found in log"
             else
-              ERRORS+=("Success marker missing in from log - deployment may have failed mid-run")
+              ERRORS+=("Success marker missing from log")
               echo "  Last 20 lines of log:"
-              tail -20 "$LOG_FILE" || true
+              tail -20 "\$LOG_FILE" || true
             fi
 
             # 2. Module directory and src
             echo "--- Checking module directory ---"
-            if [ ! -d "$MODULE_DIR" ]; then 
-              ERRORS+=("Module directory missing: $MODULE_DIR")
+            if [ ! -d "\$MODULE_DIR" ]; then
+              ERRORS+=("Module directory missing: \$MODULE_DIR")
             else
-              echo "  [OK] $MODULE_DIR exist"
+              echo "  [OK] \$MODULE_DIR exists"
 
-              # config.json must have been rendered (not just template)
-              if [ ! -f "$MODULE_DIR/config/config.json" ]; then 
+              if [ ! -f "\$MODULE_DIR/config/config.json" ]; then
                 ERRORS+=("config.json not found - SSM render may have failed")
               else
                 echo "  [OK] config.json present"
-                # validate is a valid json 
-                python3 -c "
-          import json, sys
-          try:
-            json.load(open('$MODULE_DIR/config/config.json'))
-            print('  [OK] config.json is valid JSON')
-          except Exception as e:
-            print(f'  [FAIL] config.json is not valid JSON: {e}') 
-            sys.exit(1)
-                "
+                python3 -c "import json,sys; json.load(open('\$MODULE_DIR/config/config.json')) and print('  [OK] config.json is valid JSON')" || { echo "  [FAIL] config.json is not valid JSON"; exit 1; }
               fi
 
-              # src must not be empty 
-              SRC_COUNT=$(find "$MODULE_DIR/src" -type f 2>/dev/null | wc -l)
-              if [ "$SRC_COUNT" -eq 0 ]; then 
+              SRC_COUNT=\$(find "\$MODULE_DIR/src" -type f 2>/dev/null | wc -l)
+              if [ "\$SRC_COUNT" -eq 0 ]; then
                 ERRORS+=("src/ is empty in deployed module")
               else
-                echo "  [OK] src - $SRC_COUNT files"
+                echo "  [OK] src - \$SRC_COUNT files"
               fi
             fi
 
             # 3. jars
             echo "--- Checking jars ---"
-            if [[ "$NEED_JARS" == 'true' ]]; then 
-              if [ ! -d "$DEPLOY_BASE/jars" ]; then 
+            if [[ "\$NEED_JARS" == "true" ]]; then
+              if [ ! -d "\$DEPLOY_BASE/jars" ]; then
                 ERRORS+=("jars/ directory missing from deployments/")
               else
-                SERVER_JARS_VERSION=$(cat "$DEPLOY_BASE/jars/VERSION" 2>/dev/null || echo "MISSING")
-                if [[ "$SERVER_JARS_VERSION" == "$JARS_VERSION" ]]; then 
-                  echo "  [OK] jars version $SERVER_JARS_VERSION"
+                SERVER_JARS_VERSION=\$(cat "\$DEPLOY_BASE/jars/VERSION" 2>/dev/null || echo "MISSING")
+                if [[ "\$SERVER_JARS_VERSION" == "\$JARS_VERSION" ]]; then
+                  echo "  [OK] jars version \$SERVER_JARS_VERSION"
                 else
-                  ERRORS+=("jars VERSION mismatch - expected $JARS_VERSION, got $SERVER_JARS_VERSION")
+                  ERRORS+=("jars VERSION mismatch - expected \$JARS_VERSION, got \$SERVER_JARS_VERSION")
                 fi
-                JAR_COUNT=$(find "DEPLOY_BASE/jars" --name "*.jar" | wc -l)
-                echo "  [OK] $JAR_COUNT jar file(s) present"
+                JAR_COUNT=\$(find "\$DEPLOY_BASE/jars" -name "*.jar" | wc -l)
+                echo "  [OK] \$JAR_COUNT jar file(s) present"
               fi
-            else 
+            else
               echo "  [SKIP] jars not required"
             fi
 
             # 4. Tools/utils
-            if [[ "$NEED_TOOLS" == "true" ]]; then
-              if [ ! -d "$DEPLOY_BASE/utils" ]; then 
+            if [[ "\$NEED_TOOLS" == "true" ]]; then
+              if [ ! -d "\$DEPLOY_BASE/utils" ]; then
                 ERRORS+=("utils/ directory missing from deployments/")
               else
-                SERVER_UTILS_VERSION=$(cat "$DEPLOY_BASE/utils/VERSION" 2>/dev/null || echo "MISSING")
-                if [[ "$SERVER_UTILS_VERSION" == "$TOOLS_VERSION" ]]; then 
-                  echo "  [OK] utils version $SERVER_UTILS_VERSION"
-                elif [[ "$SKIP_TOOLS" == "true" ]]; then
-                  # Was skipped intentionally - version on server may be older
-                  # but that was the decision made at build time
-                  WARNINGS+=("utils version $SERVER_UTILS_VERSION kept (skip_tools='true', required=$TOOLS_VERSION)")
+                SERVER_UTILS_VERSION=\$(cat "\$DEPLOY_BASE/utils/VERSION" 2>/dev/null || echo "MISSING")
+                if [[ "\$SERVER_UTILS_VERSION" == "\$TOOLS_VERSION" ]]; then
+                  echo "  [OK] utils version \$SERVER_UTILS_VERSION"
+                elif [[ "\$SKIP_TOOLS" == "true" ]]; then
+                  WARNINGS+=("utils version \$SERVER_UTILS_VERSION kept (skip_tools=true, required=\$TOOLS_VERSION)")
                 else
-                  ERRORS+=("utils VERSION mismatch - expected $TOOLS_VERSION, got $SERVER_UTILS_VERSION")
+                  ERRORS+=("utils VERSION mismatch - expected \$TOOLS_VERSION, got \$SERVER_UTILS_VERSION")
                 fi
               fi
-            else 
+            else
               echo "  [SKIP] tools not required"
             fi
 
-            # 5. Airflow 
-            if [[ "$NEED_AIRFLOW" == "true" ]]; then 
-              if [ ! -d "$DEPLOY_BASE/airflow" ]; then
+            # 5. Airflow
+            if [[ "\$NEED_AIRFLOW" == "true" ]]; then
+              if [ ! -d "\$DEPLOY_BASE/airflow" ]; then
                 ERRORS+=("airflow/ directory missing from deployments/")
               else
-                SERVER_AIRFLOW_VERSION=$(cat "$DEPLOY_BASE/airflow/VERSION" 2>/dev/null || echo "MISSING")
-                if [[ "$SERVER_AIRFLOW_VERSION" == "$AIRFLOW_VERSION" ]]; then 
-                  echo "  [OK] airflow version $SERVER_AIRFLOW_VERSION"
-                elif [[ "$SKIP_AIRFLOW" == "true" ]]; then 
-                  WARNINGS+=("airflow version $SERVER_AIRFLOW_VERSION kept (skip_airflow=true, required=$AIRFLOW_VERSION)")
+                SERVER_AIRFLOW_VERSION=\$(cat "\$DEPLOY_BASE/airflow/VERSION" 2>/dev/null || echo "MISSING")
+                if [[ "\$SERVER_AIRFLOW_VERSION" == "\$AIRFLOW_VERSION" ]]; then
+                  echo "  [OK] airflow version \$SERVER_AIRFLOW_VERSION"
+                elif [[ "\$SKIP_AIRFLOW" == "true" ]]; then
+                  WARNINGS+=("airflow version \$SERVER_AIRFLOW_VERSION kept (skip_airflow=true, required=\$AIRFLOW_VERSION)")
                 else
-                  ERRORS+=("airflow VERSION mismatch - expected $AIRFLOW_VERSION, got $SERVER_AIRFLOW_VERSION")
+                  ERRORS+=("airflow VERSION mismatch - expected \$AIRFLOW_VERSION, got \$SERVER_AIRFLOW_VERSION")
                 fi
               fi
-            else 
+            else
               echo "  [SKIP] airflow not required"
             fi
 
             # 6. method/business
             echo "--- Checking method/business ---"
-            if [[ "$NEED_METHOD" == "true" ]]; then
-              if [ ! -d "$DEPLOY_BASE/method/business" ]; then 
+            if [[ "\$NEED_METHOD" == "true" ]]; then
+              if [ ! -d "\$DEPLOY_BASE/method/business" ]; then
                 ERRORS+=("method/business/ missing from deployments/")
               else
                 echo "  [OK] method/business present"
-                # Check config files 
-                for folder in Logs Result Archive; do 
-                  CFG="$DEPLOY_BASE/method/business/$folder/config/config.json"
-                  if [ -f "$CFG" ]; then
-                    echo "  [OK] method/business/$folder/config/config.json"
+                for folder in Logs Result Archive; do
+                  CFG="\$DEPLOY_BASE/method/business/\$folder/config/config.json"
+                  if [ -f "\$CFG" ]; then
+                    echo "  [OK] method/business/\$folder/config/config.json"
                   else
-                    WARNINGS+=("method/business/$folder/config/config.json not rendered")
+                    WARNINGS+=("method/business/\$folder/config/config.json not rendered")
                   fi
                 done
               fi
@@ -251,25 +255,25 @@ jobs:
               echo "  [SKIP] method not required"
             fi
 
-            # 7. Disk space sanity check 
+            # 7. Disk space
             echo "--- Disk space ---"
-            DISK_USAGE=$(df -h "$DEPLOY_BASE" | tail -1 | awk '{print $5}' | tr -d '%')
-            if [ "$DISK_USAGE" -gt 90 ]; then
-              WARNINGS+=("Disk usage at ${DISK_USAGE}% on deployment partition")
+            DISK_USAGE=\$(df -h "\$DEPLOY_BASE" | tail -1 | awk '{print \$5}' | tr -d '%')
+            if [ "\$DISK_USAGE" -gt 90 ]; then
+              WARNINGS+=("Disk usage at \${DISK_USAGE}% on deployment partition")
             else
-              echo "  [OK] Disk usage: ${DISK_USAGE}%"
+              echo "  [OK] Disk usage: \${DISK_USAGE}%"
             fi
 
-            # 8. Report 
+            # 8. Report
             echo ""
-            for w in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do
-              echo "::warning::$w"
+            for w in "\${WARNINGS[@]+"\${WARNINGS[@]}"}"; do
+              echo "::warning::\$w"
             done
 
-            if [ ${#ERRORS[@]} -gt 0 ]; then
+            if [ \${#ERRORS[@]} -gt 0 ]; then
               echo "=== Verify FAILED ==="
-              for e in "${ERRORS[@]}"; do
-                echo "::error::$e"
+              for e in "\${ERRORS[@]}"; do
+                echo "::error::\$e"
               done
               exit 1
             fi
@@ -280,7 +284,7 @@ jobs:
 
           echo "$RESULT"
 
-          if echo "$RESULT" | grep -q "Verify FAILED"; then 
+          if echo "$RESULT" | grep -q "Verify FAILED"; then
             echo "verify_status=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi

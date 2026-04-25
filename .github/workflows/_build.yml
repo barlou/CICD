@@ -222,23 +222,24 @@ jobs:
           echo "=== Preflight for module: $MODULE ==="
 
           SRC_PATH="${{ steps.cfg.output.path_src }}"
-          SRC_PATH="${SRC_PATH:-$MODULE/src}"
+          SRC_PATH="${SRC_PATH:-src}"
+          echo "  DEBUG SRC_PATH: $SRC_PATH"
 
           # src directory 
           if [ ! -d "$SRC_PATH" ]; then
             ERRORS+=("Missing src directory: $MODULE/src")
           else
-            FILE_COUNT=$(find "$MODULE/src" -type f | wc -l)
+            FILE_COUNT=$(find "$SRC_PATH" -type f | wc -l)
             if [ "$FILE_COUNT" -eq 0 ]; then
-              WARNINGS+=("$MODULE/src exists but contains no files.")
+              WARNINGS+=("$SRC_PATH exists but contains no files.")
             else
               echo "  [OK] src - $FILE_COUNT file(s)."
             fi
           fi
 
           TEST_PATH="${{ steps.cfg.outputs.path_tests }}"
-          TEST_PATH="${$TEST_PATH:-$MODULE/tests/}"
-
+          TEST_PATH="${TEST_PATH:-tests}"
+          
           # Tests (optional)
           if [ ! -d "$TEST_PATH" ]; then 
             WARNINGS+=("No tests/ found at $MODULE/tests - skipping tests copy")
@@ -248,7 +249,8 @@ jobs:
 
           # requirements
           REQ_PATH="${{ steps.cfg.outputs.path_requirements }}"
-          REQ_PATH="${REQ_PATH:-$MODULE/requirements.txt}"
+          REQ_PATH="${REQ_PATH:-requirements.txt}"
+          
           if [ ! -f "$REQ_PATH" ]; then
             ERRORS+=("Missing requirements.txt at $REQ_PATH")
           else
@@ -271,14 +273,10 @@ jobs:
 
           # Airflow schedule 
           if [[ "${{ steps.cfg.outputs.need_airflow }}" == "true" ]]; then 
-            [[ -z "${{ steps.cfg.outputs.airflow_version }}" ]] \ 
-              && ERRORS+=("components.airflow.version not set in cicd.config.yml")
-            [[ -z "${{ steps.cfg.outputs.airflow_repo }}" ]] \
-              && ERRORS+=("components.airflow.repo not set in cicd.config.yml")
-            [[ -z "${{ steps.cfg.outputs.airflow_id }}" ]] \
-              && ERRORS+=("components.airflow.instance_id is not set in cicd.config.yml")
-            [[ ${#ERRORS[@]} -eq 0 ]] \
-              && echo "  [OK] airflow declared - version ${{ steps.cfg.outputs.airflow_version }}"
+            [[ -z "${{ steps.cfg.outputs.airflow_version }}" ]] && ERRORS+=("components.airflow.version not set in cicd.config.yml")
+            [[ -z "${{ steps.cfg.outputs.airflow_repo }}" ]]    && ERRORS+=("components.airflow.repo not set in cicd.config.yml")
+            [[ -z "${{ steps.cfg.outputs.airflow_id }}" ]]      && ERRORS+=("components.airflow.instance_id is not set in cicd.config.yml")
+            [[ ${#ERRORS[@]} -eq 0 ]] && echo "  [OK] airflow declared - version ${{ steps.cfg.outputs.airflow_version }}"
           else
             echo "  [SKIP] airflow not required"
           fi
@@ -537,7 +535,7 @@ jobs:
 
           # src
           SRC_PATH="${{ steps.cfg.outputs.path_src }}"
-          SRC_PATH="${SRC_PATH:-$MODULE/src}"
+          SRC_PATH="${SRC_PATH:-/src}"
 
           find "$SRC_PATH" -type f | while IFS= read -r f; do 
             rel="${f#$SRC_PATH/}"
@@ -549,7 +547,7 @@ jobs:
 
           # tests
           TESTS_PATH="${{ steps.cfg.outputs.path_tests }}"
-          TESTS_PATH="${TESTS_PATH:-$MODULE/tests}"
+          TESTS_PATH="${TESTS_PATH:-tests}"
 
           if [ -d "$TESTS_PATH" ]; then 
             cp -r "$TESTS_PATH/." "$MODULE_DIR/tests/"
@@ -680,20 +678,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: deployment-manifest-${{ steps.resolve.outputs.module }}
-          path: deployment_manifest.txt
-          retention-days: 1
-          if-no-files-found: warn
-
-      - name: Upload deployment archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-archive
-          path: ${{ steps.package.outputs.archive_name }}
-          retention-days: 1
-
-      - name: Upload deployment manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-manifest-${{ inputs.module }}
           path: deployment_manifest.txt
           retention-days: 1
