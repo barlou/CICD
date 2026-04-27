@@ -61,6 +61,10 @@ on:
         required: false
         type: string
         default: ""
+      ssm_region:
+        required: false
+        type: string
+        default: "eu-west-3"
       secrets_map:
         required: false
         type: string
@@ -162,6 +166,7 @@ jobs:
           export ENVIRONMENT="${{ inputs.environment }}"
           export DEPLOYMENT_ID="$DEPLOYMENT_ID"
           export SSM_PREFIX="${{ inputs.ssm_prefix }}"
+          export SSM_REGION="${{ inputs.ssm_region }}"
           export NEED_JARS="${{ inputs.need_jars }}"
           export NEED_TOOLS="${{ inputs.need_tools }}"
           export NEED_AIRFLOW="${{ inputs.need_airflow }}"
