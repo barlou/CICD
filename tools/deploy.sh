@@ -82,17 +82,47 @@ echo "Module source: $MODULE_SOURCE"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Fetch a single parameter from AWS SSM
+# Fails loudly if the parameter is missing or returns empty —
+# the original `|| echo ""` silently substituted empty strings into config.json.
 fetch_ssm() {
     local param="$1"
-    aws ssm get-parameter \
-        --name "$param" \
-        --with-decryption \
-        --query "Parameter.Value" \
-        --output text 2>/dev/null || echo ""
+    local value ssm_err
+    if ! value=$(
+        aws ssm get-parameter \
+            --name            "$param" \
+            --with-decryption \
+            --region          "$SSM_REGION" \
+            --query           "Parameter.value" \
+            --output          text \
+            2>/tmp/ssm_err_$$  
+    ); then
+        ssm_err=$(cat /tmp/ssm_err_$$ 2>/dev/null || true)
+        rm -f /tmp/ssm_err_$$
+        echo "::error::Failed to fetch SSM parameter: $param"
+        echo "  AWS: $ssm_err"
+        echo "  Run: python3 setup_ssm.py --env $ENVIRONMENT"
+        exit 1 
+    fi 
+    rm -f /tmp/ssm_err_$$
+
+    if [ -z "$value" ]; then 
+        echo "::error::SSM parameter is empty: $param"
+        exit 1
+    fi
+
+    printf '%s' "$value"
 }
 
-# Render config.template.json -> config.json using SSM-fetched values 
-# Uses MODULE_NAME and all exported env vars from fetch_all_secrets
+# Render config.template.json → config.json substituting {{ PLACEHOLDER }} tokens.
+# Values come from env vars exported by fetch_all_secrets().
+#
+# Why Python and not sed?
+#   sed treats `/`, `&`, `\` as special in the replacement string — a password
+#   containing any of those silently corrupts the output. Python str.replace()
+#   is byte-literal and handles any character safely.
+#
+# Values are passed via RENDER_SECRETS_JSON (env var) not as CLI args,
+# so they don't appear in `ps aux` output.
 render_config() {
     local template="$1"
     local output="$2"
@@ -102,41 +132,45 @@ render_config() {
         return 0
     fi
 
-    python3 - <<PYEOF
+    python3 - "$template" "$output"<<'PYEOF'
 import json, re, os, sys
 
-template_path = "$template"
-output_path = "$output"
+template_path = sys.argv[1]
+output_path   = sys.argv[2]
 
-raw = open(template_path).read()
+with open(template_path, "r", encoding="utf-8") as fn:
+    content = fn.read()
 
 # Always-available substitutions
-raw = raw.replace("{{ MODULE }}", os.environ.get("MODULE_NAME", ""))
-raw = raw.replace("{{ DEPLOYMENT_DATE}}", os.environ.get("DEPLOYMENT_DATE", ""))
+content = content.replace("{{ MODULE }}", os.environ.get("MODULE_NAME", ""))
+content = content.replace("{{ DEPLOYMENT_DATE}}", os.environ.get("DEPLOYMENT_DATE", ""))
 
 # Dynamic substitutions - every {{ KEY }} resolved from env 
-placeholders = set(re.findall(r'\{\{\s*(\w+)\s*\}\}', raw))
+placeholders = set(re.findall(r'\{\{\s*(\w+)\s*\}\}', content))
 missing = []
 
 for key in placeholders:
     value = os.environ.get(key, "")
     if not value:
         missing.append(key)
-    raw = raw.replace("{{ " + key + " }}", value)
-    raw = raw.replace("{{" + key + "}}", value)
+    else:
+        content = content.replace("{{ " + key + " }}", value)
+        content = content.replace("{{" + key + "}}", value)
+
 if missing: 
      for m in missing: 
-        print(f"WARNINNG: palceholders {{{m}}} has no value - check SSM path")
+        print(f"WARNING: placeholders {{{m}}} has no value - check SSM path")
+    sys.exit(1)
 
 # Validate rendered output is valid JSON
 try:
-    json.loads(raw)
+    json.loads(content)
 except json.JSONDecodeError as e:
     print(f"ERROR: Rendered config.json is not valid JSON: {e}")
     sys.exit(1)
 
 with open(output_path,  "w") as f: 
-    f.write(raw)
+    f.write(content)
 
 os.chmod(output_path, 0o600)
 print(f"config.json written to {output_path}")
@@ -153,11 +187,11 @@ fetch_all_secrets() {
     export DEPLOYMENT_DATE
     DEPLOYMENT_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    export DB_HOST; DB_HOST=$(fetch_ssm "$SSM_PREFIX/db/host")
-    export DB_NAME; DB_NAME=$(fetch_ssm "$SSM_PREFIX/db/name")
-    export DB_PORT; DB_PORT=$(fetch_ssm "$SSM_PREFIX/db/port")
-    export DB_USER; DB_USER=$(fetch_ssm "$SSM_PREFIX/db/user")
-    export DB_PASSWORD; DB_PASSWORD=$(fetch_ssm "$SSM_PREFIX/db/password")
+    export SERVER_DB_HOST; SERVER_DB_HOST=$(fetch_ssm "$SSM_PREFIX/db/host")
+    export SERVER_DB_NAME; SERVER_DB_NAME=$(fetch_ssm "$SSM_PREFIX/db/name")
+    export SERVER_DB_PORT; SERVER_DB_PORT=$(fetch_ssm "$SSM_PREFIX/db/port")
+    export SERVER_DB_USER; SERVER_DB_USER=$(fetch_ssm "$SSM_PREFIX/db/user")
+    export SERVER_DB_PASSWORD; SERVER_DB_PASSWORD=$(fetch_ssm "$SSM_PREFIX/db/password")
     export BUCKET_NAME; BUCKET_NAME=$(fetch_ssm "$SSM_PREFIX/storage/bucket")
     export SERVER_ACCESS_KEY; SERVER_ACCESS_KEY=$(fetch_ssm "$SSM_PREFIX/storage/access_key")
     export SERVER_SECRET_KEY; SERVER_SECRET_KEY=$(fetch_ssm "$SSM_PREFIX/storage/secret_key")
@@ -173,33 +207,33 @@ fetch_all_secrets() {
 # Backup of modules / airflow / tools - utils
 create_backup () {
     echo "--- Creating backup before deploy ---"
-    BACKUP_DIR="$DEPLOY_BASE/.backups/$DEPLOYMENT_ID"
-    mkdir -p "$BACKUP_DIR"
+    local backup_dir="$DEPLOY_BASE/.backups/$DEPLOYMENT_ID"
+    mkdir -p "$backup_dir"
 
     # Backup module directory 
     if [ -d "$MODULE_DIR" ]; then 
-        cp -r "$MODULE_DIR" "$BACKUP_DIR/module"
+        cp -r "$MODULE_DIR" "$backup_dir/module"
         echo "  [OK] module backed up"
     fi
 
     # Backup method/business 
     if [ -d "$DEPLOY_BASE/method/business" ]; then
-        cp -r "$DEPLOY_BASE/method/business" "$BACKUP_DIR/method_business"
+        cp -r "$DEPLOY_BASE/method/business" "$backup_dir/method_business"
         echo "  [OK] method/business backed up"
     fi
 
     # Backup VERSION files only for jars/utils/airflow
-    [ -f "$DEPLOY_BASE/jars/VERSION" ] && cp "$DEPLOY_BASE/jars/VERSION" "$BACKUP_DIR/jars_VERSION"
-    [ -f "$DEPLOY_BASE/utils/VERSION" ] && cp "$DEPLOY_BASE/utils/VERSION" "$BACKUP_DIR/utils_VERSION"
-    [ -f "$DEPLOY_BASE/airflow/VERSION" ] && cp "$DEPLOY_BASE/airflow/VERSION" "$BACKUP_DIR/airflow_VERSION"
+    [ -f "$DEPLOY_BASE/jars/VERSION" ] && cp "$DEPLOY_BASE/jars/VERSION" "$backup_dir/jars_VERSION"
+    [ -f "$DEPLOY_BASE/utils/VERSION" ] && cp "$DEPLOY_BASE/utils/VERSION" "$backup_dir/utils_VERSION"
+    [ -f "$DEPLOY_BASE/airflow/VERSION" ] && cp "$DEPLOY_BASE/airflow/VERSION" "$backup_dir/airflow_VERSION"
     
     # Backup full airflow dir if being updated
     if [[ "$NEED_AIRFLOW" == "true" && "$SKIP_AIRFLOW" != "true" && -d "$DEPLOY_BASE/airflow" ]]; then
-        cp -r "$DEPLOY_BASE/airflow" "$BACKUP_DIR/airflow"
+        cp -r "$DEPLOY_BASE/airflow" "$backup_dir/airflow"
         echo "  [OK] airflow backed up"
     fi
 
-    echo "  Backup stored at: $BACKUP_DIR"
+    echo "  Backup stored at: $backup_dir"
 }
 
 # Write VERSION file and log it 
