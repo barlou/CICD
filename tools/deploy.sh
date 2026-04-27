@@ -187,11 +187,11 @@ fetch_all_secrets() {
     export DEPLOYMENT_DATE
     DEPLOYMENT_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    export DB_HOST; DB_HOST=$(fetch_ssm "$SSM_PREFIX/db/host")
-    export DB_NAME; DB_NAME=$(fetch_ssm "$SSM_PREFIX/db/name")
-    export DB_PORT; DB_PORT=$(fetch_ssm "$SSM_PREFIX/db/port")
-    export DB_USER; DB_USER=$(fetch_ssm "$SSM_PREFIX/db/user")
-    export DB_PASSWORD; DB_PASSWORD=$(fetch_ssm "$SSM_PREFIX/db/password")
+    export SERVER_DB_HOST; SERVER_DB_HOST=$(fetch_ssm "$SSM_PREFIX/db/host")
+    export SERVER_DB_NAME; SERVER_DB_NAME=$(fetch_ssm "$SSM_PREFIX/db/name")
+    export SERVER_DB_PORT; SERVER_DB_PORT=$(fetch_ssm "$SSM_PREFIX/db/port")
+    export SERVER_DB_USER; SERVER_DB_USER=$(fetch_ssm "$SSM_PREFIX/db/user")
+    export SERVER_DB_PASSWORD; SERVER_DB_PASSWORD=$(fetch_ssm "$SSM_PREFIX/db/password")
     export BUCKET_NAME; BUCKET_NAME=$(fetch_ssm "$SSM_PREFIX/storage/bucket")
     export SERVER_ACCESS_KEY; SERVER_ACCESS_KEY=$(fetch_ssm "$SSM_PREFIX/storage/access_key")
     export SERVER_SECRET_KEY; SERVER_SECRET_KEY=$(fetch_ssm "$SSM_PREFIX/storage/secret_key")
