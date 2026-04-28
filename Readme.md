@@ -1,5 +1,12 @@
 # CICD Framework — barlou/CICD
 
+![CI](https://github.com/barlou/scheduler/actions/
+workflows/ci.yml/badge.svg?branch=main)
+![Release](https://img.shields.io/github/v/release/barlou/scheduler)
+![Python](https://img.shields.io/badge/python-3.11+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Security](https://img.shields.io/badge/security-gitleaks-red)
+
 > **A complete, modular, and reusable CI/CD system built on GitHub Actions — designed to industrialise the deployment of data, ML, and application projects without configuration duplication.**
 
 ---
