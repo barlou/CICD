@@ -283,7 +283,7 @@ jobs:
           new_version = os.environ["NEW_VERSION"]
           module      = os.environ["MODULE"]
 
-          changelog   = PATH("CHANGELOG.md")
+          changelog   = Path("CHANGELOG.md")
           today       = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
           # Build new entry 
