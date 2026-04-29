@@ -323,12 +323,14 @@ jobs:
             encoding="utf-8"
           )
 
-          print(f"  [OK] CHANGELOG.md"          # DEBUG — show exactly where the file was written
+          print(f"  [OK] CHANGELOG.md updated —— {tag} prepended")
+          
+          # DEBUG — show exactly where the file was written
           import subprocess
           print(f"  Written to : {changelog.resolve()}")
           print(f"  CWD        : {Path.cwd()}")
           print(f"  Exists     : {changelog.exists()}")
-          print(f"  Size       : {changelog.stat().st_size} bytes")d updated —— {tag} prepended")
+          print(f"  Size       : {changelog.stat().st_size} bytes")
           PYEOF
           # DEBUG — show git status after python writes the file
           echo "=== git status ==="
