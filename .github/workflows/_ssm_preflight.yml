@@ -1,0 +1,62 @@
+# barlou/CICD/.github/workflows/_ssm_preflight.yml
+name: SSM Preflight
+
+on: 
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      ssm_prefix:
+        required: true
+        type: string
+      ssm_region:
+        required: false
+        type: string
+        default: "eu-west-3"
+      config:
+        required: false
+        type: string
+        default: "cicd.config.yml"
+    secrets:
+      SERVER_ACCESS_KEY:
+        required: true
+      SERVER_SECRET_KEY:
+        required: true
+
+jobs:
+  preflight: 
+    name: Validate and provision SSM
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 1
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with: 
+          python-version: "3.11"
+      - name: Install dependencies 
+        run: pip install boto3 pyyaml --quiet 
+      - name: fetch ssm_preflight.py from CICD repo 
+        run: |
+          mkdir -p tools
+            curl -sSL \
+              -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+              -H "Accept: application/vnd.github/raw" \
+              "https://api.github.com/repos/barlou/CICD/contents/tools/ssm_preflight.py" \
+              -o tools/ssm_preflight.py
+            echo "  [OK] ssm_preflight.py fetched"
+      - name: Run SSM preflight 
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.SERVER_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SERVER_SECRET_KEY }}
+          AWS_DEFAULT_REGION:    ${{ inputs.ssm_region}}
+          SECRETS_JSON:          ${{ toJson(secrets) }}
+        run: |
+          python3 tools/ssm_preflight.py \
+            --config ${{ inputs.config }} \
+            --env    ${{ inputs.environment }} \
+            --prefix ${{ inputs.ssm_prefix }} \
+            --region ${{ inputs.ssm_region }} 
