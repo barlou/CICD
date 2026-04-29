@@ -177,12 +177,18 @@ jobs:
           set -euo pipefail
 
           if [[ -z "$LATEST_TAG" ]]; then 
-            RAW=$(git log --first-parent --no-merges \
-              --pretty=format:"%s|||%h|||%an" -20)
+            RAW=$(git log --no-merges \
+              --pretty=format:"%s|||%h|||%an" -20 \
+              | grep -v "$chore(release):" \
+              | grep -v "^chore:" \
+              || true)
           else
             RAW=$(git log "${LATEST_TAG}..HEAD" \
-              --first-parent --no-merges \
-              --pretty=format:"%s|||%h|||%an")
+              --no-merges \
+              --pretty=format:"%s|||%h|||%an" \
+              | grep -v "^chore(release):" \
+              | grep -v "^chore:" \
+              || true) 
           fi
 
           {
@@ -284,6 +290,7 @@ jobs:
           module      = os.environ["MODULE"]
 
           changelog   = Path("CHANGELOG.md")
+          changelog   = Path("CHANGELOG.md")
           today       = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
           # Build new entry 
@@ -331,12 +338,47 @@ jobs:
           print(f"  CWD        : {Path.cwd()}")
           print(f"  Exists     : {changelog.exists()}")
           print(f"  Size       : {changelog.stat().st_size} bytes")
+          
+          # DEBUG — show exactly where the file was written
+          import subprocess
+          print(f"  Written to : {changelog.resolve()}")
+          print(f"  CWD        : {Path.cwd()}")
+          print(f"  Exists     : {changelog.exists()}")
+          print(f"  Size       : {changelog.stat().st_size} bytes")
           PYEOF
           # DEBUG — show git status after python writes the file
           echo "=== git status ==="
           git status
           echo "=== git diff ==="
           git diff --stat
+
+      # 7. Commit and push CHANGELOG.md
+      - name: Commit CHANGELOG.md
+        env:
+          TAG:      ${{ steps.compute.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          # Stage CHANGELOG.md first
+          git add CHANGELOG.md
+
+          # Check if there is actually something staged
+          # Works for both new untracked files AND modifications
+          if git diff --cached --quiet; then
+            echo "  [SKIP] CHANGELOG.md unchanged — nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "chore(release): update CHANGELOG.md for ${TAG}"
+          git push origin HEAD
+          echo "  [OK] CHANGELOG.md committed and pushed"
 
       # 6. Create and push annotated tag 
       - name: Create and push tag
