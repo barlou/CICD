@@ -180,28 +180,63 @@ PYEOF
 # Fetch all secrets from SSM and export them into the environment 
 # so render_config() can resolve every placeholders 
 fetch_all_secrets() {
-    echo "--- Fetching secrets from SSH: ${SSM_PREFIX} ---"
+    echo "--- Fetching secrets from SSM: ${SSM_PREFIX} ---"
+
+    if [ -z "${SECRET_MAP_JSON:-}"] || ["$SECREt_MAP" == "{}" ]; then
+        echo "::error::SECRET_MAP_JSON is empty."
+        echo "  Check cicd.config.yml → secrets_map is declared"
+        exit 1
+    fi
 
     # Core secrets - extend this list as your template grows 
     # Pattern: export PLACEHOLDER_NAME=$(fetch_ssm "$SSM_PREFIX/ssm_key")
     export DEPLOYMENT_DATE
     DEPLOYMENT_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    export MODULE="$MODULE_NAME"
 
-    export SERVER_DB_HOST; SERVER_DB_HOST=$(fetch_ssm "$SSM_PREFIX/db/host")
-    export SERVER_DB_NAME; SERVER_DB_NAME=$(fetch_ssm "$SSM_PREFIX/db/name")
-    export SERVER_DB_PORT; SERVER_DB_PORT=$(fetch_ssm "$SSM_PREFIX/db/port")
-    export SERVER_DB_USER; SERVER_DB_USER=$(fetch_ssm "$SSM_PREFIX/db/user")
-    export SERVER_DB_PASSWORD; SERVER_DB_PASSWORD=$(fetch_ssm "$SSM_PREFIX/db/password")
-    export BUCKET_NAME; BUCKET_NAME=$(fetch_ssm "$SSM_PREFIX/storage/bucket")
-    export SERVER_ACCESS_KEY; SERVER_ACCESS_KEY=$(fetch_ssm "$SSM_PREFIX/storage/access_key")
-    export SERVER_SECRET_KEY; SERVER_SECRET_KEY=$(fetch_ssm "$SSM_PREFIX/storage/secret_key")
-    export EXCHANGE_ACCESS_KEY; EXCHANGE_ACCESS_KEY=$(fetch_ssm "$SSM_PREFIX/exchange/access_key")
-    export EXCHANGE_SECRET_KEY; EXCHANGE_SECRET_KEY=$(fetch_ssm "$SSM_PREFIX/exchange/secret_key")
-    export TRAINING_TABLE; TRAINING_TABLE=$(fetch_ssm "$SSM_PREFIX/training/table")
-    export STABLECOIN; STABLECOIN=$(fetch_ssm "$SSM_PREFIX/training/stablecoin")
-    export CRYPTOCURRENCIES_JSON; CRYPTOCURRENCIES_JSON=$(fetch_ssm "$SSM_PREFIX/training/cryptocurrencies")
+    # Parse SECRET_MAP_JSON and fetch each secret dynamically
+    # SECRET_MAP_JSON = {"PLACEHOLDER": "relative/ssm/path", ...}
+    # Full SSM path = $SSM_PREFIX/$relative_path
+    # = /$module/$environment/relative/path
+    local = missing()
 
-    echo "Secrets fetched"
+    while IFS=$'\t' read -r placeholder relative_path; do
+        local ssm_path="$SSM_PREFIX/$relative_path"
+        local value 
+
+        value=$(fetch_ssm "$ssm_path") || {
+            missing+=(" ❌ $placeholder → $ssm_path"
+            continue)
+        }
+
+        export "$placeholder=$value"
+        echo "  [OK] $placeholder ← $ssm_path"
+    done < <(python3 -c "
+import json, sys
+
+try:
+    secrets_map = json.loads('''$SECRET_MAP_JSON''')
+except json.JSONDecodeError as e:
+    printf(f'::error::SECRET_MAP_JSON is not valid JSON; {e}', file=sys.stderr)
+    sys.exit(1)
+
+for placeholder, relative_path in secrets_map.items():
+    print(f'{placeholder}\t{relative_path}')
+")
+    if [ ${#missing[@]} -gt 0 ];
+        echo ""
+        echo "::error::Failed to fetch ${#missing[@]} secret(s) from SSM:"
+        for m in "${#missing[@]}"; do
+            echo "$m"
+        done
+        echo ""
+        echo "To provision missing parameters, run:"
+        echo "  python3 bootstrap.py --env $ENVIRONMENT --config cicd.config.yml"
+        exit 1
+    fi
+
+    local count 
+    count=$(python3 -c "import json, print(len(json.loads('''SECRET_MAP_JSON''')))")
 }
 
 # Backup of modules / airflow / tools - utils
