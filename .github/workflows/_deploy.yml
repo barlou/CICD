@@ -69,6 +69,10 @@ on:
         required: false
         type: string
         default: "{}"
+      secrets_backend:
+        required: false
+        type: string
+        default: "ssm"
     secrets:
       SERVER_USERNAME:
         required: true
@@ -178,7 +182,11 @@ jobs:
           export TOOLS_VERSION="${{ inputs.tools_version }}"
           export AIRFLOW_VERSION="${{ inputs.airflow_version }}"
           export AIRFLOW_ID="${{ inputs.airflow_id }}"
-          export SECRET_MAP_JSON="${{ inputs.secret_map }}"
+          export SECRET_MAP_JSON="${{ inputs.secrets_map }}"
+          export SECRETS_BACKEND="${{ inputs.secrets_backend }}"
+          export AWS_ACCESS_KEY_ID="${{ secrets.SERVER_ACCESS_KEY }}"
+          export AWS_SECRET_ACCESS_KEY="${{ secrets.SERVER_SECRET_KEY }}"
+          export AWS_DEFAULT_REGION="${{ inputs.ssm_region }}"
           EOF
 
           echo "deploy_env.sh written"
