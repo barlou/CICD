@@ -48,6 +48,28 @@ cleanup() {
     echo "Cleaning up temp files..."
     rm -rf "$TEMP_DIR"
     rm -f ~/deploy_env.sh ~/deploy.sh ~/"$ARCHIVE"
+    echo "  [OK] temp files removed"
+
+    # Unset secret env vars — only relevant for github backend 
+    # For ssm backend, values were never exported to env 
+    if [ "$SECRETS_BACKEND:-ssm" = "github" ]; then
+        if [ -n "${SECRET_MAP_JSON:-}"] && [ "$SECRET_MAP_JSON" != "{}" ]; then 
+            while IFS= read -r placeholder; do
+                unset "$placeholder" 2>/dev/null || true
+            done < <(python3 -c"
+import json, sys
+try:
+    m = json.loads('''SECRET_MAP_JSON''')
+    for k in m:
+        print(k)
+except Exception as e:
+    print(f'::warning::Could not parse SECRET_MAP_JSON in cleanup: {e}',
+            file=sys.stderr)
+            ")
+            unset SECRETS_VALUES_JSON 2>/dev/null || true 
+            echo "  [OK] secret env vars unset"
+        fi
+    fi
 }
 trap cleanup EXIT
 
@@ -87,6 +109,7 @@ echo "Module source: $MODULE_SOURCE"
 fetch_ssm() {
     local param="$1"
     local value ssm_err
+
     if ! value=$(
         aws ssm get-parameter \
             --name            "$param" \
@@ -126,61 +149,144 @@ fetch_ssm() {
 render_config() {
     local template="$1"
     local output="$2"
+    local backend="${SECRETS_BACKEND:-ssm}"
 
     if [ ! -f "$template" ]; then
         echo "WARNING: No config template at $template - skipping render"
         return 0
     fi
 
-    python3 - "$template" "$output"<<'PYEOF'
-import json, re, os, sys
+    python3 - "$template" "$output" "$backend" <<PYEOF
+import json, re, os, sys, boto3
 
 template_path = sys.argv[1]
 output_path   = sys.argv[2]
+backend       = sys.argv[3]
 
-with open(template_path, "r", encoding="utf-8") as fn:
-    content = fn.read()
+with open(template_path, "r", encoding="utf-8") as f:
+    content = f.read()
 
-# Always-available substitutions
-content = content.replace("{{ MODULE }}", os.environ.get("MODULE_NAME", ""))
-content = content.replace("{{ DEPLOYMENT_DATE}}", os.environ.get("DEPLOYMENT_DATE", ""))
-
-# Dynamic substitutions - every {{ KEY }} resolved from env 
+# Extract all placeholders from template
 placeholders = set(re.findall(r'\{\{\s*(\w+)\s*\}\}', content))
-missing = []
+missing      = []
 
-for key in placeholders:
-    value = os.environ.get(key, "")
-    if not value:
-        missing.append(key)
-    else:
-        content = content.replace("{{ " + key + " }}", value)
-        content = content.replace("{{" + key + "}}", value)
+# ── SSM backend — fetch each value directly from AWS SSM ─────────────────────
+if backend == "ssm":
+    ssm_prefix  = os.environ.get("SSM_PREFIX", "").strip("/")
+    ssm_region  = os.environ.get("SSM_REGION", "eu-west-3")
+    secret_map  = json.loads(os.environ.get("SECRET_MAP_JSON", "{}"))
 
-if missing: 
-     for m in missing: 
-        print(f"WARNING: placeholders {{{m}}} has no value - check SSM path")
+    # Runtime vars — resolved from env, not SSM
+    runtime = {
+        "MODULE":          os.environ.get("MODULE_NAME", ""),
+        "DEPLOYMENT_DATE": os.environ.get("DEPLOYMENT_DATE", ""),
+    }
+
+    ssm_client = boto3.client("ssm", region_name=ssm_region)
+
+    for key in placeholders:
+        # Runtime vars — never from SSM
+        if key in runtime:
+            value = runtime[key]
+
+        # SSM vars — fetch directly
+        elif key in secret_map:
+            ssm_path = f"/{ssm_prefix}/{secret_map[key]}"
+            try:
+                resp  = ssm_client.get_parameter(
+                    Name=ssm_path,
+                    WithDecryption=True
+                )
+                value = resp["Parameter"]["Value"]
+                if not value.strip():
+                    missing.append(
+                        f"  ❌ {{{{ {key} }}}} → {ssm_path} "
+                        f"(empty value in SSM)"
+                    )
+                    continue
+            except ssm_client.exceptions.ParameterNotFound:
+                missing.append(
+                    f"  ❌ {{{{ {key} }}}} → {ssm_path} "
+                    f"(not found in SSM)"
+                )
+                continue
+            except Exception as e:
+                missing.append(
+                    f"  ❌ {{{{ {key} }}}} → {ssm_path} "
+                    f"(AWS error: {e})"
+                )
+                continue
+
+        # Not in secrets_map — configuration error
+        else:
+            missing.append(
+                f"  ❌ {{{{ {key} }}}} not declared in "
+                f"cicd.config.yml secrets_map"
+            )
+            continue
+
+        # Replace both {{ KEY }} and {{KEY}} variants
+        content = re.sub(rf'\{{\{{\s*{re.escape(key)}\s*\}}\}}', value, content)
+
+# ── GitHub backend — read from env vars exported by fetch_all_secrets() ──────
+elif backend == "github":
+    for key in placeholders:
+        value = os.environ.get(key, "")
+        if not value:
+            missing.append(
+                f"  ❌ {{{{ {key} }}}} not found in environment"
+            )
+            continue
+        content = re.sub(rf'\{{\{{\s*{re.escape(key)}\s*\}}\}}', value, content)
+
+else:
+    print(f"::error::Unknown secrets_backend: '{backend}'")
+    print(f"  Supported: ssm | github")
     sys.exit(1)
 
-# Validate rendered output is valid JSON
+# Fail if any placeholder unresolved
+if missing:
+    print(f"::error::Unresolved placeholder(s) in {template_path}:")
+    for m in missing:
+        print(m)
+    sys.exit(1)
+
+# Validate result is valid JSON before writing
 try:
     json.loads(content)
 except json.JSONDecodeError as e:
-    print(f"ERROR: Rendered config.json is not valid JSON: {e}")
+    print(f"::error::Rendered config is not valid JSON: {e}")
+    print("  Check SSM/secret values for special characters")
     sys.exit(1)
 
-with open(output_path,  "w") as f: 
+# Write with restricted permissions — config may contain secrets
+with open(output_path, "w", encoding="utf-8") as f:
     f.write(content)
-
 os.chmod(output_path, 0o600)
-print(f"config.json written to {output_path}")
+
+print(f"  [OK] config.json written → {output_path}")
 PYEOF
 }
 
-# Fetch all secrets from SSM and export them into the environment 
-# so render_config() can resolve every placeholders 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH ALL SECRETS
+#
+# SSM backend:
+#   validates SECRET_MAP_JSON is present
+#   sets runtime vars (DEPLOYMENT_DATE, MODULE)
+#   does NOT export placeholder values to env
+#   render_config() fetches from SSM directly
+#
+# GitHub backend:
+#   reads values from SECRETS_VALUES_JSON (written by _deploy.yml)
+#   exports each placeholder as env var for render_config()
+#   env vars are unset in cleanup() after deploy — success or failure
+# ─────────────────────────────────────────────────────────────────────────────
+
 fetch_all_secrets() {
-    echo "--- Fetching secrets from SSM: ${SSM_PREFIX} ---"
+    local backend="${SECRETS_BACKEND:-ssm}"
+    echo "--- Fetching secrets [backend: $backend] ---"
 
     if [ -z "${SECRET_MAP_JSON:-}"] || ["$SECREt_MAP" == "{}" ]; then
         echo "::error::SECRET_MAP_JSON is empty."
@@ -194,49 +300,84 @@ fetch_all_secrets() {
     DEPLOYMENT_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     export MODULE="$MODULE_NAME"
 
-    # Parse SECRET_MAP_JSON and fetch each secret dynamically
-    # SECRET_MAP_JSON = {"PLACEHOLDER": "relative/ssm/path", ...}
-    # Full SSM path = $SSM_PREFIX/$relative_path
-    # = /$module/$environment/relative/path
-    local = missing()
+    case "$backend" in
 
-    while IFS=$'\t' read -r placeholder relative_path; do
-        local ssm_path="$SSM_PREFIX/$relative_path"
-        local value 
+        # —— SSM Backend 
+        # Values are not exported to env here 
+        # render_config() fetches them directly from SSM at render time 
+        # This keeps secret values out of the process environment entirely
+        ssm)
+            echo "  SSM prefix : /${SSM_PREFIX}/"
+            echo "  Region     : $SSM_REGION"
+            echo "  Parameters : $(python3 -c "
+import json 
+print(len(json.loads('''$SECRET_MAP_JSON''')))
+")"
+            echo ""
+            echo "  Values will be fetched directly from SSM at render time."
+            echo "  ✅ No secret values stored in environment"
+            ;;
+        
+        # —— Github backend 
+        # Values read from SECRETS_VALUES_JSON and exported as env vars 
+        # render_config() reads from os.environ
+        # cleanup() unset all placeholder env vars on exit 
+        github)
+            if [ -z "${SECRETS_VALUES_JSON:-}" ] || \
+                [ "$SECRETS_VALUES_JSON" = "{}" ]; then 
+                    echo "::error::SECRETS_VALUES_JSON is empty."
+                    echo "  secrets_backend=github but no values in deploy_env.sh"
+                    echo "  Check _deploy.yml prepare step"
+                    exit 1
+            fi
 
-        value=$(fetch_ssm "$ssm_path") || {
-            missing+=(" ❌ $placeholder → $ssm_path"
-            continue)
-        }
+            local missing=()
 
-        export "$placeholder=$value"
-        echo "  [OK] $placeholder ← $ssm_path"
-    done < <(python3 -c "
+            while IFS=$'\t' read -r placeholder value; do
+                if [ -z "$value" ]; then
+                    missing+=("  ❌ $placeholder → empty value")
+                    continue
+                fi
+                export "$placeholder=$value"
+                echo "  [OK] $placeholder exported to env"
+            done < <(python3 -c "
 import json, sys
-
 try:
-    secrets_map = json.loads('''$SECRET_MAP_JSON''')
+    values = json.loads('''$SECRETS_MAP_JSON''')
 except json.JSONDecodeError as e:
-    printf(f'::error::SECRET_MAP_JSON is not valid JSON; {e}', file=sys.stderr)
+    print(f'::error::SECRETS_VALUES_JSON invalid JSON: {e}',
+            file=sys.stderr)
     sys.exit(1)
-
-for placeholder, relative_path in secrets_map.items():
-    print(f'{placeholder}\t{relative_path}')
+for placeholder, value in values.items():
+    print(f'{placeholder}\t{value}')
 ")
-    if [ ${#missing[@]} -gt 0 ];
-        echo ""
-        echo "::error::Failed to fetch ${#missing[@]} secret(s) from SSM:"
-        for m in "${#missing[@]}"; do
-            echo "$m"
-        done
-        echo ""
-        echo "To provision missing parameters, run:"
-        echo "  python3 bootstrap.py --env $ENVIRONMENT --config cicd.config.yml"
-        exit 1
-    fi
+            if [ ${#missing[@]} -gt 0 ]; then
+                echo ""
+                echo "::error::Failed to load ${#missing[@]} secret(s):"
+                for m in "${missing[@]}"; do
+                    echo "$m"
+                done
+                exit 1
+            fi
 
-    local count 
-    count=$(python3 -c "import json, print(len(json.loads('''SECRET_MAP_JSON''')))")
+            local count 
+            count=$(python3 -c "
+import json
+print(len(json.loads('''$SECRETS_MAP_JSON''')))
+") 
+            echo ""
+            echo "  ✅ $count secret(s) exported to env"
+            echo "      Will be unset in cleanup() after deploy"
+            ;;
+        
+        # —— Unknown backend 
+        *)
+            echo "::error::Unknown secrets_backend: '$backend'"
+            echo "  Supported values: ssm | github"
+            echo "  Set secret_backend in cicd.config.yml"
+            exit 1
+            ;;  
+    esac
 }
 
 # Backup of modules / airflow / tools - utils
@@ -389,7 +530,7 @@ install_module() {
     local template="$MODULE_DIR/config/config.template.json"
     local output="$MODULE_DIR/config/config.json"
 
-    render_config "$template" "$output"
+    render_config "$template" "$output" "${SECRETS_BACKEND:-ssm}"
 
     # Also render config in method/business subdirs if present 
     for folder in Logs Result Archive; do
