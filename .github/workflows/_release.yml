@@ -338,6 +338,34 @@ jobs:
           echo "=== git diff ==="
           git diff --stat
 
+      # 7. Commit and push CHANGELOG.md
+      - name: Commit CHANGELOG.md
+        env:
+          TAG:      ${{ steps.compute.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          # Stage CHANGELOG.md first
+          git add CHANGELOG.md
+
+          # Check if there is actually something staged
+          # Works for both new untracked files AND modifications
+          if git diff --cached --quiet; then
+            echo "  [SKIP] CHANGELOG.md unchanged — nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "chore(release): update CHANGELOG.md for ${TAG}"
+          git push origin HEAD
+          echo "  [OK] CHANGELOG.md committed and pushed"
+
       # 6. Create and push annotated tag 
       - name: Create and push tag
         env: 
