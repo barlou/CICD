@@ -264,6 +264,68 @@ jobs:
             fh.write("NOTES_EOF\n")
           PYEOF
 
+      - name: Update CHANGELOG.md
+        env:
+          NOTES:       ${{ steps.notes.outputs.notes }}
+          NEW_VERSION: ${{ steps.compute.outputs.new_version }}
+          MODULE:      ${{ steps.resolve.outputs.module }}
+          TAG:         ${{ steps.compute.outputs.tag_name}}
+        run: | 
+          set -euo pipefail 
+
+          python3 - <<'PYEOF'
+          import os 
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          notes       = os.environ["NOTES"]
+          tag         = os.environ["TAG"]
+          new_version = os.environ["NEW_VERSION"]
+          module      = os.environ["MODULE"]
+
+          changelog   = PATH("CHANGELOG.md")
+          today       = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+          # Build new entry 
+          # Adds date and tag link on top of the release notes 
+          # already built in step 5
+          header = (
+            f"# Changelog\n\n"
+            f"All notable changes to this project "
+            f"are documented in this file.\n\n"
+            f"---\n"
+          )
+
+          entry = (
+            f"## [{tag}] - {today}\n\n"
+            f"{notes}\n\n"
+            f"---\n"
+          )
+
+          # Read existing changelog if present
+          # Strip the header if already there - we rewrite it cleanly 
+          existing = ""
+          if changelog.exists():
+            content = changelog.read_text(encoding="utf-8")
+            # Remove existing header to avoid duplication 
+            for line in content.splitlines(keepends=True):
+              if line.startswith("# Changelog"):
+                continue
+              if line.startswith("All notable"):
+                continue
+              if line.strip() == "---" and not existing:
+                continue 
+              existing += line 
+          
+          # Write header + new_entry + existing content 
+          changelog.write_text(
+            header + entry + existing.lstrip("\n"),
+            encoding="utf-8"
+          )
+
+          print(f"  [OK] CHANGELOG.md updated —— {tag} prepended")
+          PYEOF
+
       # 6. Create and push annotated tag 
       - name: Create and push tag
         env: 
