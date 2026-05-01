@@ -80,6 +80,17 @@ on:
         required: true
       SERVER_SSH_KEY:
         required: true
+      AIRFLOW_DB_HOST:        { required: false }
+      AIRFLOW_DB_PORT:        { required: false }
+      AIRFLOW_DB_NAME:        { required: false }
+      AIRFLOW_DB_USER:        { required: false }
+      AIRFLOW_DB_PASSWORD:    { required: false }
+      AIRFLOW_SECRET_KEY:     { required: false }
+      AIRFLOW_ADMIN_PASSWORD: { required: false }
+      AIRFLOW_SMTP_HOST:      { required: false }
+      AIRFLOW_SMTP_PORT:      { required: false }
+      AIRFLOW_SMTP_FROM:      { required: false }
+      AIRFLOW_REDIS_HOST:     { required: false }
     outputs:
       deployment_id:
         description: "Unique deployment identifier"
@@ -191,7 +202,51 @@ jobs:
 
           echo "deploy_env.sh written"
           cat deploy_env.sh
-      
+
+      # 5b. Inject secrets for github backend
+      # Builds SECRETS_VALUES_JSON — what deploy.sh's github case reads.
+      # Runs only when secrets_backend=github, skipped entirely for ssm.
+      - name: Inject secrets (github backend)
+        if: inputs.secrets_backend == 'github'
+        env:
+          # Add any secret your consuming project needs here.
+          # Key = placeholder name used in config.template.json or setup.sh
+          AIRFLOW_DB_HOST:        ${{ secrets.AIRFLOW_DB_HOST }}
+          AIRFLOW_DB_PORT:        ${{ secrets.AIRFLOW_DB_PORT }}
+          AIRFLOW_DB_NAME:        ${{ secrets.AIRFLOW_DB_NAME }}
+          AIRFLOW_DB_USER:        ${{ secrets.AIRFLOW_DB_USER }}
+          AIRFLOW_DB_PASSWORD:    ${{ secrets.AIRFLOW_DB_PASSWORD }}
+          AIRFLOW_SECRET_KEY:     ${{ secrets.AIRFLOW_SECRET_KEY }}
+          AIRFLOW_ADMIN_PASSWORD: ${{ secrets.AIRFLOW_ADMIN_PASSWORD }}
+          AIRFLOW_SMTP_HOST:      ${{ secrets.AIRFLOW_SMTP_HOST }}
+          AIRFLOW_SMTP_PORT:      ${{ secrets.AIRFLOW_SMTP_PORT }}
+          AIRFLOW_SMTP_FROM:      ${{ secrets.AIRFLOW_SMTP_FROM }}
+          AIRFLOW_REDIS_HOST:     ${{ secrets.AIRFLOW_REDIS_HOST }}
+        run: |
+          set -euo pipefail
+
+          # Build SECRETS_VALUES_JSON: { "PLACEHOLDER": "secret_value", ... }
+          # Values passed via env vars — never via CLI args (would appear in ps aux).
+          SECRETS_VALUES_JSON=$(python3 -c "
+          import json, os, sys
+          keys = [
+              'AIRFLOW_DB_HOST', 'AIRFLOW_DB_PORT', 'AIRFLOW_DB_NAME',
+              'AIRFLOW_DB_USER', 'AIRFLOW_DB_PASSWORD', 'AIRFLOW_SECRET_KEY',
+              'AIRFLOW_ADMIN_PASSWORD', 'AIRFLOW_SMTP_HOST', 'AIRFLOW_SMTP_PORT',
+              'AIRFLOW_SMTP_FROM', 'AIRFLOW_REDIS_HOST',
+          ]
+          secrets = {k: os.environ.get(k, '') for k in keys}
+          missing = [k for k, v in secrets.items() if not v]
+          if missing:
+              [print(f'::error::GitHub secret not set: {m}', file=sys.stderr) for m in missing]
+              sys.exit(1)
+          print(json.dumps(secrets))
+          ")
+          
+          # Append to deploy_env.sh using printf to safely handle special chars in values
+          printf "export SECRETS_VALUES_JSON='%s'\n" "$SECRETS_VALUES_JSON" >> deploy_env.sh
+          echo "  [OK] SECRETS_VALUES_JSON written to deploy_env.sh"
+
       # 6. Setup SSH
       - name: Setup SSH
         run: | 
