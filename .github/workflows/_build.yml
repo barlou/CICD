@@ -53,6 +53,8 @@ on:
         value: ${{ jobs.build.outputs.skip_tools }}
       skip_airflow:
         value: ${{ jobs.build.outputs.skip_airflow }}
+      skip_jars:
+        value: ${{ jobs.build.outputs.skip_jars }}
       need_jars:
         value: ${{ jobs.build.outputs.need_jars }}
       need_tools:
@@ -576,7 +578,7 @@ jobs:
             mkdir -p /tmp/tools_fetch 
             git clone \
               --depth 1 \
-              --branch "$TOOLS_VERSION" \ 
+              --branch "$TOOLS_VERSION" \
               "https://x-access-token:${GH_TOKEN}@github.com/$TOOLS_REPO.git" \
               /tmp/tools_fetch
             mkdir -p "$DEPLOY_DIR/utils"
