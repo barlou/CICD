@@ -112,7 +112,7 @@ jobs:
       - name: Fetch deploy script
         run: |
           mkdir -p tools
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/barlou/CICD/contents/tools/deploy.sh" -o tools/deploy.sh
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/barlou/CICD/contents/tools/deploy.sh?ref=develop" -o tools/deploy.sh
           chmod +x tools/deploy.sh
           echo "  [OK] deploy.sh fetched"
       
@@ -176,29 +176,27 @@ jobs:
 
           # Build the env file transferred to the server
           # Contains no secret values - only runtime context
-          cat > deploy_env.sh <<EOF
-          export MODULE_NAME="${{ steps.resolve.outputs.module }}"
-          export ENVIRONMENT="${{ inputs.environment }}"
-          export DEPLOYMENT_ID="$DEPLOYMENT_ID"
-          export SSM_PREFIX="${{ inputs.ssm_prefix }}"
-          export SSM_REGION="${{ inputs.ssm_region }}"
-          export NEED_JARS="${{ inputs.need_jars }}"
-          export NEED_TOOLS="${{ inputs.need_tools }}"
-          export NEED_AIRFLOW="${{ inputs.need_airflow }}"
-          export NEED_METHOD="${{ inputs.need_method }}"
-          export SKIP_JARS="${{ inputs.skip_jars }}"
-          export SKIP_TOOLS="${{ inputs.skip_tools }}"
-          export SKIP_AIRFLOW="${{ inputs.skip_airflow }}"
-          export JARS_VERSION="${{ inputs.jars_version }}"
-          export TOOLS_VERSION="${{ inputs.tools_version }}"
-          export AIRFLOW_VERSION="${{ inputs.airflow_version }}"
-          export AIRFLOW_ID="${{ inputs.airflow_id }}"
-          export SECRET_MAP_JSON="${{ inputs.secrets_map }}"
-          export SECRETS_BACKEND="${{ inputs.secrets_backend }}"
-          export AWS_ACCESS_KEY_ID="${{ secrets.SERVER_ACCESS_KEY }}"
-          export AWS_SECRET_ACCESS_KEY="${{ secrets.SERVER_SECRET_KEY }}"
-          export AWS_DEFAULT_REGION="${{ inputs.ssm_region }}"
-          EOF
+          printf 'export MODULE_NAME="%s"\n'            "${{ steps.resolve.outputs.module }}" >> deploy_env.sh
+          printf 'export ENVIRONMENT="%s"\n'            "${{ inputs.environment }}" >> deploy_env.sh
+          printf 'export DEPLOYMENT_ID="%s"\n'          "$DEPLOYMENT_ID" >> deploy_env.sh
+          printf 'export SSM_PREFIX="%s"\n'             "${{ inputs.ssm_prefix }}" >> deploy_env.sh
+          printf 'export SSM_REGION="%s"\n'             "${{ inputs.ssm_region }}" >> deploy_env.sh
+          printf 'export NEED_JARS="%s"\n'              "${{ inputs.need_jars }}" >> deploy_env.sh
+          printf 'export NEED_TOOLS="%s"\n'             "${{ inputs.need_tools }}" >> deploy_env.sh
+          printf 'export NEED_AIRFLOW="%s"\n'           "${{ inputs.need_airflow }}" >> deploy_env.sh
+          printf 'export NEED_METHOD="%s"\n'            "${{ inputs.need_method }}" >> deploy_env.sh
+          printf 'export SKIP_JARS="%s"\n'              "${{ inputs.skip_jars }}" >> deploy_env.sh
+          printf 'export SKIP_TOOLS="%s"\n'             "${{ inputs.skip_tools }}" >> deploy_env.sh
+          printf 'export SKIP_AIRFLOW="%s"\n'           "${{ inputs.skip_airflow }}" >> deploy_env.sh
+          printf 'export JARS_VERSION="%s"\n'           "${{ inputs.jars_version }}" >> deploy_env.sh
+          printf 'export TOOLS_VERSION="%s"\n'          "${{ inputs.tools_version }}" >> deploy_env.sh
+          printf 'export AIRFLOW_VERSION="%s"\n'        "${{ inputs.airflow_version }}" >> deploy_env.sh
+          printf 'export AIRFLOW_ID="%s"\n'             "${{ inputs.airflow_id }}" >> deploy_env.sh
+          printf "export SECRET_MAP_JSON='%s'\n"        '${{ inputs.secrets_map }}' >> deploy_env.sh
+          printf 'export SECRETS_BACKEND="%s"\n'        "${{ inputs.secrets_backend }}" >> deploy_env.sh
+          printf 'export AWS_ACCESS_KEY_ID="%s"\n'      "${{ secrets.SERVER_ACCESS_KEY }}" >> deploy_env.sh
+          printf 'export AWS_SECRET_ACCESS_KEY="%s"\n'  "${{ secrets.SERVER_SECRET_KEY }}" >> deploy_env.sh
+          printf 'export AWS_DEFAULT_REGION="%s"\n'     "${{ inputs.ssm_region }}" >> deploy_env.sh
 
           echo "deploy_env.sh written"
           cat deploy_env.sh
@@ -288,6 +286,8 @@ jobs:
             set -euo pipefail
 
             source ~/deploy_env.sh
+            echo "SECRET_MAP_JSON value: $SECRET_MAP_JSON"
+            echo "SECRET_MAP_JSON length: ${#SECRET_MAP_JSON}"
 
             echo "=== Remote deployment starting ==="
             echo "  Module:      $MODULE_NAME"

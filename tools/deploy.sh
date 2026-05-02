@@ -52,7 +52,7 @@ cleanup() {
 
     # Unset secret env vars — only relevant for github backend 
     # For ssm backend, values were never exported to env 
-    if [ "$SECRETS_BACKEND:-ssm" = "github" ]; then
+    if [ "${SECRETS_BACKEND:-ssm}" = "github" ]; then
         if [ -n "${SECRET_MAP_JSON:-}"] && [ "$SECRET_MAP_JSON" != "{}" ]; then 
             while IFS= read -r placeholder; do
                 unset "$placeholder" 2>/dev/null || true
@@ -288,7 +288,7 @@ fetch_all_secrets() {
     local backend="${SECRETS_BACKEND:-ssm}"
     echo "--- Fetching secrets [backend: $backend] ---"
 
-    if [ -z "${SECRET_MAP_JSON:-}"] || ["$SECREt_MAP" == "{}" ]; then
+    if [ -z "${SECRET_MAP_JSON:-}" ] || [ "$SECRET_MAP_JSON" == "{}" ]; then
         echo "::error::SECRET_MAP_JSON is empty."
         echo "  Check cicd.config.yml → secrets_map is declared"
         exit 1
@@ -343,7 +343,7 @@ print(len(json.loads('''$SECRET_MAP_JSON''')))
             done < <(python3 -c "
 import json, sys
 try:
-    values = json.loads('''$SECRETS_MAP_JSON''')
+    values = json.loads('''$SECRET_MAP_JSON''')
 except json.JSONDecodeError as e:
     print(f'::error::SECRETS_VALUES_JSON invalid JSON: {e}',
             file=sys.stderr)
@@ -363,7 +363,7 @@ for placeholder, value in values.items():
             local count 
             count=$(python3 -c "
 import json
-print(len(json.loads('''$SECRETS_MAP_JSON''')))
+print(len(json.loads('''$SECRET_MAP_JSON''')))
 ") 
             echo ""
             echo "  ✅ $count secret(s) exported to env"
