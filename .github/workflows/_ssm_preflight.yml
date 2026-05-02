@@ -44,8 +44,8 @@ jobs:
           mkdir -p tools
             curl -sSL \
               -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
-              -H "Accept: application/vnd.github/raw" \
-              "https://api.github.com/repos/barlou/CICD/contents/tools/ssm_preflight.py" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/barlou/CICD/contents/tools/ssm_preflight.py?ref=develop" \
               -o tools/ssm_preflight.py
             echo "  [OK] ssm_preflight.py fetched"
       - name: Run SSM preflight 

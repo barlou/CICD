@@ -102,7 +102,7 @@ jobs:
       airflow_version:   ${{ steps.cfg.outputs.airflow_version }}
       airflow_id:        ${{ steps.cfg.outputs.airflow_id }}
       ssm_prefix:        ${{ steps.cfg.outputs.ssm_prefix }}
-      secret_map:        ${{ steps.cfg.outputs.secret_map }}
+      secrets_map:       ${{ steps.cfg.outputs.secrets_map }}
       path_src:          ${{ steps.cfg.outputs.path_src }}
       path_tests:        ${{ steps.cfg.outputs.path_tests }}
       path_requirements: ${{ steps.cfg.outputs.path_requirements }}

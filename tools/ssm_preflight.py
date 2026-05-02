@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import boto3, yaml
-from botocore.exceptions import ClientError, NoCredentailsError
+from botocore.exceptions import ClientError, NoCredentialsError
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data structures
@@ -50,11 +50,11 @@ class preflightReport:
 
     @property
     def created(self) -> list[ParameterResult]:
-        return (r for r in self.results if r.status == "created")
+        return [r for r in self.results if r.status == "created"]
     
     @property
     def missing(self) -> list[ParameterResult]:
-        return (r for r in self.results if r.status == "missing")
+        return [r for r in self.results if r.status == "missing"]
     
     @property
     def success(self) -> bool:
@@ -123,7 +123,7 @@ class SSMPreflight:
         Returns false if not found - raises an unexpected AWS errors
         """
         try:
-            resp = self._ssm_get_parameter(Name=ssm_path, WithDecryption=False)
+            resp = self._ssm.get_parameter(Name=ssm_path, WithDecryption=False)
             return bool(resp["Parameter"]["Value"].strip())
         except self._ssm.exceptions.ParameterNotFound:
             return False
@@ -143,7 +143,7 @@ class SSMPreflight:
         Overwrite=False - never silently overwrites existing values
         """
         self._ssm.put_parameter(
-            Name=ssm_path, Value=value, type="SecureString", 
+            Name=ssm_path, Value=value, Type="SecureString", 
             Description= f"Auto-provisioned by ssm_preflight.py \n - {self.env} \n - {placeholder}", 
             Overwrite=False
         )
@@ -191,7 +191,7 @@ class SSMPreflight:
             print(f"    [OK] AWS credentials valid")
             print(f"        Account : {identity['Account']}")
             print(f"        ARN     : {identity['Arn']}")
-        except NoCredentailsError:
+        except NoCredentialsError:
             print("  ❌ No AWS credentials found.")
             print(
                 "       set AWS_ACCESS_KEY_ID and "
@@ -221,7 +221,7 @@ class SSMPreflight:
                     status="exists",
                     source="ssm"
                 )
-        except RuntimeError as e:
+        except Exception as e:
             return ParameterResult(
                 placeholder=placeholder,
                 ssm_path=ssm_path,
