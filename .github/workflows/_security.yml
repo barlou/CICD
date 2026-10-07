@@ -457,7 +457,7 @@ jobs:
             {
               "name": "pip-audit",
               "status": os.environ.get("PIP_AUDIT_STATUS", "failure"),
-              "allow_failure": os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false").lower() == "false"
+              "allow_failure": os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false").lower() == "true"
             },
           ]
 
