@@ -355,10 +355,11 @@ jobs:
           grep -v "file://" requirements.txt \
             | grep -v "^#" \
             | grep -v "^$" \
+            | grep -v "^-" \
             > /tmp/requirements_audit.txt
 
           pip-audit \
-            -r requirements_audit.txt \
+            -r /tmp/requirements_audit.txt \
             --format json \
             --output pip-audit-report.json \
             --desc \
