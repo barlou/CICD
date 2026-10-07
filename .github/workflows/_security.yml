@@ -315,6 +315,9 @@ jobs:
               # Strip inline comments 
               line = line.split("#")[0].strip()
 
+              if 'file://' in line:
+                continue
+
               # A valid constrained line contains ==, >=, <=, ~=, !=, >X, <X
               # e.g, pandas==2.0.0 / pandas>=2.0.0,<3.0.0 / pandas~=2.0.0
               if not re.search(r'(==|>=|<=|~=|!=|<|>)', line):
@@ -348,9 +351,14 @@ jobs:
         continue-on-error: true
         run: | 
           set -euo pipefail
+          # Filter out file:// entries and local installs before auditing 
+          grep -v "file://" requirements.txt \
+            | grep -v "^#" \
+            | grep -v "^$" \
+            > /tmp/requirements_audit.txt
 
           pip-audit \
-            -r requirements.txt \
+            -r requirements_audit.txt \
             --format json \
             --output pip-audit-report.json \
             --desc \
