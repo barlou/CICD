@@ -434,7 +434,7 @@ jobs:
         env:
           GITLEAKS_STATUS:         ${{ needs.gitleaks.outputs.status }}
           SEMGREP_STATUS:          ${{ needs.semgrep.outputs.status }}
-          PIP_AUDIT_STATUS:        ${{ needs.pip_audit.outputs.status }}
+          PIP_AUDIT_STATUS:        ${{ needs.pip-audit.outputs.status }}
           GITLEAKS_ALLOW_FAILURE:  ${{ inputs.gitleaks_allow_failure || false }}
           SEMGREP_ALLOW_FAILURE:   ${{ inputs.semgrep_allow_failure || false }}
           PIP_AUDIT_ALLOW_FAILURE: ${{ inputs.pip_audit_allow_failure || false }}          
