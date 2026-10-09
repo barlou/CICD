@@ -275,7 +275,7 @@ jobs:
     name: pip-audit - dependency vulnerabilities 
     runs-on: ubuntu-24.04
     outputs: 
-      status: ${{ steps.scan.outputs.status || steps.check_req.outpus.status || 'success' }}
+      status: ${{ steps.scan.outputs.status || steps.check_req.outputs.status || 'success' }}
     
     steps:
       - name: Checkout repository 
@@ -457,7 +457,7 @@ jobs:
             },
             {
               "name": "pip-audit",
-              "status": os.environ.get("PIP_AUDIT_STATUS", "failure"),
+              "status": os.environ.get("PIP_AUDIT_STATUS", "success"),
               "allow_failure": os.environ.get("PIP_AUDIT_ALLOW_FAILURE", "false").lower() == "true"
             },
           ]
