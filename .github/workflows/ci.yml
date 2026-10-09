@@ -44,7 +44,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       !startsWith(github.event.head_commit.message, 'chore(release):')
-    uses: barlou/CICD/.github/workflows/_release.yml@main
+    uses: barlou/CICD/.github/workflows/_release.yml@develop
     with:
       module: cicd
     secrets: inherit
