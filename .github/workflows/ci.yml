@@ -31,7 +31,7 @@ jobs:
   security:
     name: Security gate
     if: github.ref == 'refs/heads/release'
-    uses: barlou/CICD/.github/workflows/_security.yml@main
+    uses: barlou/CICD/.github/workflows/_security.yml@develop
     with:
       gitleaks_allow_failure:  ${{ inputs.gitleaks_allow_failure || false }}
       semgrep_allow_failure:   ${{ inputs.semgrep_allow_failure  || false }}
@@ -44,7 +44,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       !startsWith(github.event.head_commit.message, 'chore(release):')
-    uses: barlou/CICD/.github/workflows/_release.yml@main
+    uses: barlou/CICD/.github/workflows/_release.yml@develop
     with:
       module: cicd
     secrets: inherit
