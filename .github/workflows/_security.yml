@@ -536,6 +536,9 @@ jobs:
           git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
 
+          # Remove downloaded artifact reports before switching branches 
+          rm -rf security-report/
+          
           git fetch origin main release
 
           git checkout main 
