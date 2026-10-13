@@ -259,7 +259,7 @@ jobs:
             echo "  [OK] requirements.txt"
           fi
 
-          if [ ! -f "pyproject.toml" ]; 
+          if [ ! -f "pyproject.toml" ]; then
             cp "pyproject.toml" "$MODULE_DIR/pyproject.toml"
             echo "  [OK] pyproject.toml copied"
           else
