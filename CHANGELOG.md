@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 
 ---
+## [cicd-v1.5.3] - 2026-10-09
+
+## cicd v1.5.3
+
+> **Bump type:** Patch - bug fix
+> **Previous version:** cicd-v1.5.2
+
+### Fixes
+- fix: correct security-report/ folder to avoid untracked and blocked merging code from release to main ([`d68f19d`](../../commit/d68f19d)) - Louis Barillon
+
+
+---
+---
 ## [cicd-v1.5.2] - 2026-10-09
 
 ## cicd v1.5.2
