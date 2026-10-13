@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 
 ---
+## [cicd-v1.6.0] - 2026-10-13
+
+## cicd v1.6.0
+
+> **Bump type:** Minor - new feature
+> **Previous version:** cicd-v1.5.3
+
+### Features
+- feat: add pyproject.toml to be build on the artifact before being deployed on servers ([`92270d1`](../../commit/92270d1)) - Louis Barillon
+
+
+---
+---
 ## [cicd-v1.5.3] - 2026-10-09
 
 ## cicd v1.5.3
