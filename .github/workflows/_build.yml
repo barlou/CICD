@@ -260,7 +260,7 @@ jobs:
           fi
 
           if [ ! -f "pyproject.toml" ]; then
-            cp "pyproject.toml" "$MODULE_DIR/pyproject.toml"
+            cp "pyproject.toml" "$MODULE/pyproject.toml"
             echo "  [OK] pyproject.toml copied"
           else
             echo "  [SKIP] pyproject.toml not found - skipping"
