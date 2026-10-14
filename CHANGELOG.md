@@ -3,6 +3,22 @@
 All notable changes to this project are documented in this file.
 
 ---
+## [cicd-v1.6.1] - 2026-10-14
+
+## cicd v1.6.1
+
+> **Bump type:** Patch - bug fix
+> **Previous version:** cicd-v1.6.0
+
+### Fixes
+- fix: correct MODULE_DIR to MODULE for pyproject.toml file build conception ([`1fbc28c`](../../commit/1fbc28c)) - Louis Barillon
+
+### Other
+- correct if condition for pyproject.toml ([`42fe069`](../../commit/42fe069)) - Louis Barillon
+
+
+---
+---
 ## [cicd-v1.6.0] - 2026-10-13
 
 ## cicd v1.6.0
