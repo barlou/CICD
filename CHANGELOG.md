@@ -3,6 +3,23 @@
 All notable changes to this project are documented in this file.
 
 ---
+## [cicd-v1.7.0] - 2026-10-19
+
+## cicd v1.7.0
+
+> **Bump type:** Minor - new feature
+> **Previous version:** cicd-v1.6.1
+
+### Features
+- feat: add spark packages to used pyspark on deployed server ([`7f3ec12`](../../commit/7f3ec12)) - Louis Barillon
+
+### Fixes
+- fix: correct MODULE_DIR to MODULE for pyproject.toml file build conception ([`99a2308`](../../commit/99a2308)) - Louis Barillon
+- fix: correct MODULE_DIR to MODULE for pyproject.toml file build conception ([`3b0290f`](../../commit/3b0290f)) - Louis Barillon
+
+
+---
+---
 ## [cicd-v1.6.2] - 2026-10-14
 
 ## cicd v1.6.2
