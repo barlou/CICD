@@ -470,6 +470,48 @@ install_tools() {
     echo "  [OK] utils installed at version $TOOLS_VERSION"
 }
 
+# Spark 
+install_spark() {
+    local SPARK_VERSION="3.3.2"
+    local SPARK_DIR="$DEPLOYMENT_BASE/spark-${SPARK_VERSION}-bin-hadoop3"
+    local SPARK_ARCHIVE="spark-${SPARK_VERSION}-bin-hadoop3.tgz"
+    local SPARK_URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${SPARK_ARCHIVE}"
+
+    echo "--- Installing Spark ---"
+
+    if [ -d "$SPARK_DIR" ] && [ -f "$SPARK_DIR/bin/spark-submit" ]; then
+        echo "  [SKIP] Spark ${SPARK_VERSION} already installed at $SPARK_DIR"
+    else   
+        echo "  Downloading Spark ${SPARK_VERSION}..."
+        cd "$DEPLOYMENT_BASE"
+        wget -q "$SPARK_URL" -O "$SPARK_ARCHIVE"
+        tar -xzf "$SPARK_ARCHIVE"
+        rm "$SPARK_ARCHIVE"
+        echo "  [OK] Spark ${SPARK_VERSION} installed"
+    fi
+
+    export SPARK_HOME="$SPARK_DIR"
+    export PATH="$SPARK_HOME/bin:$PATH"
+
+    grep -q "SPARK_HOME" ~/.bashrc || {
+        echo "export SPARK_HOME=$SPARK_DIR" >> ~/.bashrc
+        echo 'export PATH=$SPARK_HOME/bin:$PATH' >> ~/.bashrc 
+    }
+
+    if ! command -v java &>/dev/null; then 
+        echo "  [INSTALL] Java not found - installing openJDK 11..."
+        sudo apt-get install -y openjdk-11-jdk --quiet 
+        export JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64"
+        grep -q "JAVA_HOME" ~/.bashrc || \
+            echo "export JAVA_HOME=/usr/lib/jvm/java-11-openjdk11-amd64" >> ~/.bashrc
+        echo "  [OK] Java installed"
+    else    
+        echo "  [SKIP] Java: $(java --version 2>&1 | head -1)"
+    fi
+
+    echo "  [OK] SPARK_HOME=$SPARK_HOME"
+}
+
 # Airflow
 install_airflow() {
     local source="$DEPLOY_ROOT/airflow"
@@ -552,6 +594,7 @@ fetch_all_secrets
 create_backup
 install_jars
 install_tools
+install_spark
 install_airflow
 install_method
 install_module
