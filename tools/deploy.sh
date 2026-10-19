@@ -473,7 +473,7 @@ install_tools() {
 # Spark 
 install_spark() {
     local SPARK_VERSION="3.3.2"
-    local SPARK_DIR="$DEPLOYMENT_BASE/spark-${SPARK_VERSION}-bin-hadoop3"
+    local SPARK_DIR="$DEPLOY_BASE/spark-${SPARK_VERSION}-bin-hadoop3"
     local SPARK_ARCHIVE="spark-${SPARK_VERSION}-bin-hadoop3.tgz"
     local SPARK_URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${SPARK_ARCHIVE}"
 
@@ -483,7 +483,7 @@ install_spark() {
         echo "  [SKIP] Spark ${SPARK_VERSION} already installed at $SPARK_DIR"
     else   
         echo "  Downloading Spark ${SPARK_VERSION}..."
-        cd "$DEPLOYMENT_BASE"
+        cd "$DEPLOY_BASE"
         wget -q "$SPARK_URL" -O "$SPARK_ARCHIVE"
         tar -xzf "$SPARK_ARCHIVE"
         rm "$SPARK_ARCHIVE"
