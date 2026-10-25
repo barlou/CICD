@@ -3,6 +3,22 @@
 All notable changes to this project are documented in this file.
 
 ---
+## [cicd-v1.8.0] - 2026-10-25
+
+## cicd v1.8.0
+
+> **Bump type:** Minor - new feature
+> **Previous version:** cicd-v1.7.0
+
+### Features
+- feat: allow possibility to use special deployment for api & frontend application ([`69a70b5`](../../commit/69a70b5)) - Louis Barillon
+
+### Fixes
+- fix: correct unbound variable ([`6444ca4`](../../commit/6444ca4)) - Louis Barillon
+
+
+---
+---
 ## [cicd-v1.7.1] - 2026-10-19
 
 ## cicd v1.7.1
