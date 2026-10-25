@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 
 ---
+## [cicd-v1.7.1] - 2026-10-19
+
+## cicd v1.7.1
+
+> **Bump type:** Patch - bug fix
+> **Previous version:** cicd-v1.7.0
+
+### Fixes
+- fix: correct unbound variable ([`6444ca4`](../../commit/6444ca4)) - Louis Barillon
+
+
+---
+---
 ## [cicd-v1.7.0] - 2026-10-19
 
 ## cicd v1.7.0
