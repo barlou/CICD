@@ -574,6 +574,15 @@ install_module() {
 
     render_config "$template" "$output" "${SECRETS_BACKEND:-ssm}"
 
+    # Run module setup script if present (e.g, API venv + systemd)
+    local setup_script="$MODULE_DIR/scripts/setup.sh"
+    if [ -f "$setup_script" ]; then
+        echo "  Running scripts/setup.sh.."
+        chmod +x "$setup_script"
+        bash "$setup_script" "$MODULE_DIR"
+        echo "  [OK] setup.sh complete"
+    fi
+
     # Also render config in method/business subdirs if present 
     for folder in Logs Result Archive; do
         local method_tmpl="$DEPLOY_BASE/method/business/$folder/config/config.template.json"
